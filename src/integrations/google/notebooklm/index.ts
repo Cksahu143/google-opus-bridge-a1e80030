@@ -265,21 +265,28 @@ export const notebooklmAdapter = defineAdapter({
         const client = await db();
         const { data, error } = await client
           .from("nexus_notebooks")
-          .select("*, nexus_notebook_sources(id)")
+          .select("*")
           .eq("user_id", ctx.userId)
           .order("updated_at", { ascending: false });
         if (error) throw error;
+        const notebooks = (data ?? []) as NotebookRow[];
+        // No FK embed: count sources with a separate query so this works
+        // regardless of whether PostgREST knows the relationship.
+        const { data: sourceRows, error: sourceError } = await client
+          .from("nexus_notebook_sources")
+          .select("notebook_id")
+          .eq("user_id", ctx.userId);
+        if (sourceError) throw sourceError;
+        const counts = new Map<string, number>();
+        for (const row of sourceRows ?? []) {
+          counts.set(row.notebook_id, (counts.get(row.notebook_id) ?? 0) + 1);
+        }
         return {
-          notebooks: (data ?? []).map((row) => {
-            const { nexus_notebook_sources: sources, ...notebook } = row as NotebookRow & {
-              nexus_notebook_sources?: { id: string }[];
-            };
-            return {
-              ...notebook,
-              sourceCount: sources?.length ?? 0,
-              url: notebookUrl(notebook.id),
-            };
-          }),
+          notebooks: notebooks.map((notebook) => ({
+            ...notebook,
+            sourceCount: counts.get(notebook.id) ?? 0,
+            url: notebookUrl(notebook.id),
+          })),
         };
       },
     }),
