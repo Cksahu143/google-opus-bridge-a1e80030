@@ -153,15 +153,7 @@ export type Database = {
           updated_at?: string
           user_id?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "nexus_notebook_sources_notebook_id_fkey"
-            columns: ["notebook_id"]
-            isOneToOne: false
-            referencedRelation: "nexus_notebooks"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       nexus_notebooks: {
         Row: {
@@ -190,6 +182,33 @@ export type Database = {
           title?: string
           updated_at?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      notebooklm_connections: {
+        Row: {
+          connected_at: string
+          disconnected_at: string | null
+          last_used_at: string | null
+          status: string
+          user_id: string
+          vault_secret_name: string
+        }
+        Insert: {
+          connected_at?: string
+          disconnected_at?: string | null
+          last_used_at?: string | null
+          status?: string
+          user_id: string
+          vault_secret_name: string
+        }
+        Update: {
+          connected_at?: string
+          disconnected_at?: string | null
+          last_used_at?: string | null
+          status?: string
+          user_id?: string
+          vault_secret_name?: string
         }
         Relationships: []
       }
@@ -327,7 +346,18 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      vault_create_secret: {
+        Args: {
+          secret_description?: string
+          secret_name: string
+          secret_value: string
+        }
+        Returns: string
+      }
+      vault_delete_secret_by_name: {
+        Args: { secret_name: string }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
