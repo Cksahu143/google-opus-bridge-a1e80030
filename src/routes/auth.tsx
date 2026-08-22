@@ -1,10 +1,9 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { lovable } from "@/integrations/lovable/index";
 import { supabase } from "@/integrations/supabase/client";
 import { safeNext } from "@/lib/useSession";
 
@@ -33,13 +32,29 @@ export const Route = createFileRoute("/auth")({
 
 function AuthPage() {
   const { next } = Route.useSearch();
-  const navigate = useNavigate();
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Supabase reports failed OAuth redirects in the URL hash. Without this the
+  // user is bounced back to a plain sign-in page with no explanation.
+  useEffect(() => {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const description = hash.get("error_description") ?? hash.get("error");
+    if (description) {
+      setError(decodeURIComponent(description).replace(/\+/g, " "));
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      return;
+    }
+    // Successful OAuth returns here with a session; continue to the destination.
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) window.location.replace(next);
+    });
+  }, [next]);
+
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -67,16 +82,18 @@ function AuthPage() {
   async function google() {
     setBusy(true);
     setError(null);
-    const result = await lovable.auth.signInWithOAuth("google", {
-      redirect_uri: `${window.location.origin}${next}`,
+    // External (self-managed) Supabase project: use Supabase Auth directly.
+    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: `${window.location.origin}/auth?next=${encodeURIComponent(next)}`,
+        queryParams: { prompt: "select_account" },
+      },
     });
-    if (result.error) {
+    if (oauthError) {
       setBusy(false);
-      setError(result.error.message);
-      return;
+      setError(oauthError.message);
     }
-    if (result.redirected) return;
-    navigate({ href: next });
   }
 
   return (

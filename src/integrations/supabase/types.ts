@@ -153,7 +153,15 @@ export type Database = {
           updated_at?: string
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "nexus_notebook_sources_notebook_id_fkey"
+            columns: ["notebook_id"]
+            isOneToOne: false
+            referencedRelation: "nexus_notebooks"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       nexus_notebooks: {
         Row: {
