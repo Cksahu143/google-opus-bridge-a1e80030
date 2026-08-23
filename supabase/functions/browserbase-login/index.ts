@@ -116,6 +116,10 @@ async function getOrCreateContextId(userId: string): Promise<string> {
 }
 
 serve(async (req) => {
+  // Answer preflights before any auth check, or the browser never even
+  // sends the real request.
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
   const url = new URL(req.url);
   const path = url.pathname.replace(/^\/browserbase-login/, "") || "/";
 
@@ -132,13 +136,10 @@ serve(async (req) => {
       .eq("user_id", user!.id)
       .maybeSingle();
 
-    if (dbError) return new Response(JSON.stringify({ error: dbError.message }), { status: 500 });
+    if (dbError) return json({ error: dbError.message }, 500);
 
-    return new Response(
-      JSON.stringify(
-        data ?? { status: "disconnected", connected_at: null, disconnected_at: null, last_used_at: null },
-      ),
-      { status: 200 },
+    return json(
+      data ?? { status: "disconnected", connected_at: null, disconnected_at: null, last_used_at: null },
     );
   }
 
@@ -150,9 +151,13 @@ serve(async (req) => {
     if (error) return error;
 
     if (!BROWSERBASE_API_KEY || !BROWSERBASE_PROJECT_ID) {
-      return new Response(
-        JSON.stringify({ error: "Browserbase is not configured on the server (missing API key/project id)." }),
-        { status: 503 },
+      return json(
+        {
+          error:
+            "Browserbase is not configured on the server. Add BROWSERBASE_API_KEY and " +
+            "BROWSERBASE_PROJECT_ID as secrets, then redeploy this function.",
+        },
+        503,
       );
     }
 
@@ -185,15 +190,26 @@ serve(async (req) => {
       if (!debugRes.ok) {
         throw new Error(`Failed to fetch live view URL: ${debugRes.status} ${await debugRes.text()}`);
       }
-      const debug = (await debugRes.json()) as { debuggerFullscreenUrl: string };
+      const debug = (await debugRes.json()) as {
+        debuggerFullscreenUrl?: string;
+        debuggerUrl?: string;
+        pages?: Array<{ debuggerFullscreenUrl?: string; debuggerUrl?: string }>;
+      };
+      // Browserbase has shipped this payload in a couple of shapes; prefer the
+      // fullscreen (chrome-less) URL, then the plain one, then the first page's.
+      const liveViewUrl =
+        debug.debuggerFullscreenUrl ??
+        debug.debuggerUrl ??
+        debug.pages?.[0]?.debuggerFullscreenUrl ??
+        debug.pages?.[0]?.debuggerUrl;
+      if (!liveViewUrl) {
+        throw new Error("Browserbase returned no live view URL for this session.");
+      }
 
-      return new Response(
-        JSON.stringify({ sessionId: session.id, liveViewUrl: debug.debuggerFullscreenUrl }),
-        { status: 200 },
-      );
+      return json({ sessionId: session.id, liveViewUrl });
     } catch (err) {
       console.error("browserbase-login /start failed:", err);
-      return new Response(JSON.stringify({ error: String((err as Error)?.message ?? err) }), { status: 500 });
+      return json({ error: String((err as Error)?.message ?? err) }, 500);
     }
   }
 
@@ -207,7 +223,7 @@ serve(async (req) => {
 
     const { sessionId } = await req.json().catch(() => ({}));
     if (!sessionId) {
-      return new Response(JSON.stringify({ error: "sessionId is required" }), { status: 400 });
+      return json({ error: "sessionId is required" }, 400);
     }
 
     try {
@@ -216,22 +232,26 @@ serve(async (req) => {
         throw new Error(`Could not verify Browserbase session: ${res.status} ${await res.text()}`);
       }
 
-      const { error: upsertError } = await supabase.from("notebooklm_connections").upsert({
-        user_id: user!.id,
-        // Not a secret -- just a human-readable label for the status table,
-        // matching the shape the existing notebooklm-connect function wrote.
-        // The actual login lives in Browserbase's Context, referenced by
-        // browserbase_contexts.context_id.
-        vault_secret_name: `browserbase_context:${NOTEBOOKLM_PURPOSE}`,
-        connected_at: new Date().toISOString(),
-        status: "connected",
-      });
+      const { error: upsertError } = await supabase.from("notebooklm_connections").upsert(
+        {
+          user_id: user!.id,
+          // Not a secret -- just a human-readable label for the status table,
+          // matching the shape the existing notebooklm-connect function wrote.
+          // The actual login lives in Browserbase's Context, referenced by
+          // browserbase_contexts.context_id.
+          vault_secret_name: `browserbase_context:${NOTEBOOKLM_PURPOSE}`,
+          connected_at: new Date().toISOString(),
+          disconnected_at: null,
+          status: "connected",
+        },
+        { onConflict: "user_id" },
+      );
       if (upsertError) throw new Error(upsertError.message);
 
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return json({ ok: true });
     } catch (err) {
       console.error("browserbase-login /complete failed:", err);
-      return new Response(JSON.stringify({ error: String((err as Error)?.message ?? err) }), { status: 500 });
+      return json({ error: String((err as Error)?.message ?? err) }, 500);
     }
   }
 
@@ -251,7 +271,7 @@ serve(async (req) => {
         .eq("purpose", NOTEBOOKLM_PURPOSE)
         .maybeSingle();
 
-      if (existing?.context_id) {
+      if (existing?.context_id && BROWSERBASE_API_KEY) {
         const delRes = await fetch(`${BROWSERBASE_API}/contexts/${existing.context_id}`, {
           method: "DELETE",
           headers: bbHeaders(),
@@ -274,12 +294,12 @@ serve(async (req) => {
         .update({ status: "disconnected", disconnected_at: new Date().toISOString() })
         .eq("user_id", user!.id);
 
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return json({ ok: true });
     } catch (err) {
       console.error("browserbase-login /disconnect failed:", err);
-      return new Response(JSON.stringify({ error: String((err as Error)?.message ?? err) }), { status: 500 });
+      return json({ error: String((err as Error)?.message ?? err) }, 500);
     }
   }
 
-  return new Response("Not found", { status: 404 });
+  return json({ error: "Not found" }, 404);
 });
