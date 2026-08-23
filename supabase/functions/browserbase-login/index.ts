@@ -109,7 +109,10 @@ async function getOrCreateContextId(userId: string): Promise<string> {
 
   const { error } = await supabase
     .from("browserbase_contexts")
-    .upsert({ user_id: userId, purpose: NOTEBOOKLM_PURPOSE, context_id: contextId });
+    .upsert(
+      { user_id: userId, purpose: NOTEBOOKLM_PURPOSE, context_id: contextId },
+      { onConflict: "user_id,purpose" },
+    );
   if (error) throw new Error(`Failed to store context id: ${error.message}`);
 
   return contextId;
