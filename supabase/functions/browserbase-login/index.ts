@@ -8,9 +8,10 @@
 //
 // How it works:
 //   1. /start creates (or reuses) a Browserbase Context scoped to this
-//      user, starts a Session bound to that Context, and returns the
-//      session's Live View URL -- a real, interactive iframe-able browser
-//      the user logs into Google/NotebookLM inside of.
+//      user, starts a Session bound to that Context, navigates it to
+//      NotebookLM (see navigateSession below), and returns the session's
+//      Live View URL -- a real, interactive iframe-able browser the user
+//      logs into Google/NotebookLM inside of.
 //   2. Browserbase's Context persists cookies/localStorage server-side,
 //      encrypted at rest, keyed by an opaque context id. We only ever
 //      store that id (in browserbase_contexts), never any cookie or
@@ -50,6 +51,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const BROWSERBASE_API = "https://api.browserbase.com/v1";
 const NOTEBOOKLM_PURPOSE = "notebooklm";
+// Where the session should land so the user has something to log into,
+// instead of the browser's default blank tab.
+const LOGIN_START_URL = "https://notebooklm.google.com/";
 
 // This function is called directly from the browser (src/routes/notebooks/
 // connect.tsx), so every response — including errors — needs CORS headers,
@@ -92,6 +96,64 @@ async function closeSession(sessionId: string): Promise<void> {
   }
 }
 
+// THE ACTUAL FIX for the "live view shows about:blank" bug: a freshly
+// created Browserbase session's default tab is a blank page — nothing
+// navigates it anywhere on its own. Browserbase's own examples always
+// call page.goto() via Playwright/Puppeteer immediately after creating a
+// session, before reading the debug URL, for exactly this reason. This
+// does the equivalent over raw CDP (no Playwright dependency available in
+// a Deno edge function): attach to the session's one open page target and
+// send Page.navigate.
+async function navigateSession(connectUrl: string, targetUrl: string): Promise<void> {
+  const ws = new WebSocket(connectUrl);
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error("Failed to open CDP WebSocket to Browserbase session"));
+  });
+
+  let nextId = 1;
+  function send(method: string, params: Record<string, unknown> = {}, sessionId?: string): number {
+    const id = nextId++;
+    const payload: Record<string, unknown> = { id, method, params };
+    if (sessionId) payload.sessionId = sessionId;
+    ws.send(JSON.stringify(payload));
+    return id;
+  }
+  function waitFor(id: number): Promise<{ result?: Record<string, unknown> }> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.removeEventListener("message", handler);
+        reject(new Error(`CDP timed out waiting for a response to request ${id}`));
+      }, 8000);
+      const handler = (event: MessageEvent) => {
+        const msg = JSON.parse(event.data as string);
+        if (msg.id === id) {
+          clearTimeout(timeout);
+          ws.removeEventListener("message", handler);
+          resolve(msg);
+        }
+      };
+      ws.addEventListener("message", handler);
+    });
+  }
+
+  try {
+    const targetsRes = await waitFor(send("Target.getTargets"));
+    const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
+    const pageTarget = targetInfos.find((t) => t.type === "page");
+    if (!pageTarget) throw new Error("No page target found on the new Browserbase session");
+
+    const attachRes = await waitFor(
+      send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
+    );
+    const sessionId = attachRes.result?.["sessionId"] as string | undefined;
+    if (!sessionId) throw new Error("Failed to attach to the Browserbase session's page target");
+
+    await waitFor(send("Page.navigate", { url: targetUrl }, sessionId));
+  } finally {
+    ws.close();
+  }
+}
 
 async function requireUser(req: Request) {
   const authHeader = req.headers.get("Authorization");
@@ -168,8 +230,9 @@ serve(async (req) => {
   }
 
   // --- POST /start ---
-  // Creates a session bound to the user's persistent context and returns
-  // its Live View URL for the frontend to embed in an <iframe>.
+  // Creates a session bound to the user's persistent context, navigates it
+  // to NotebookLM, and returns its Live View URL for the frontend to embed
+  // in an <iframe>.
   if (req.method === "POST" && path === "/start") {
     const { user, error } = await requireUser(req);
     if (error) return error;
@@ -206,7 +269,22 @@ serve(async (req) => {
       if (!sessionRes.ok) {
         throw new Error(`Failed to create Browserbase session: ${sessionRes.status} ${await sessionRes.text()}`);
       }
-      const session = (await sessionRes.json()) as { id: string };
+      const session = (await sessionRes.json()) as { id: string; connectUrl?: string };
+
+      // THE FIX: navigate the session before reading its live view URL, or
+      // the iframe just shows the browser's default blank tab (this was the
+      // literal "about:blank" bug). Non-fatal if it fails -- the live view
+      // still works, the user just has to type the URL in manually, which
+      // beats blocking the whole connect flow on a CDP hiccup.
+      if (session.connectUrl) {
+        try {
+          await navigateSession(session.connectUrl, LOGIN_START_URL);
+        } catch (navErr) {
+          console.error("Failed to navigate Browserbase session (non-fatal):", navErr);
+        }
+      } else {
+        console.error("Browserbase session response had no connectUrl — cannot auto-navigate.");
+      }
 
       const debugRes = await fetch(`${BROWSERBASE_API}/sessions/${session.id}/debug`, {
         headers: bbHeaders(),
