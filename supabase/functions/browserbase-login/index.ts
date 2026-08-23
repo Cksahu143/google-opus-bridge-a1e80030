@@ -51,9 +51,26 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const BROWSERBASE_API = "https://api.browserbase.com/v1";
 const NOTEBOOKLM_PURPOSE = "notebooklm";
 
+// This function is called directly from the browser (src/routes/notebooks/
+// connect.tsx), so every response — including errors — needs CORS headers,
+// and OPTIONS preflights must be answered before any auth check.
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+};
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 function bbHeaders(): Record<string, string> {
   return { "X-BB-API-Key": BROWSERBASE_API_KEY, "Content-Type": "application/json" };
 }
+
 
 async function requireUser(req: Request) {
   const authHeader = req.headers.get("Authorization");
