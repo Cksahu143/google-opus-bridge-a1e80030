@@ -26,6 +26,22 @@ export const githubAdapter = defineAdapter({
   },
   capabilities: [
     defineCapability({
+      id: "github.list_my_repos",
+      title: "List my repositories",
+      description:
+        "List every repository the authenticated token can see, including private ones — unlike browsing github.com/<user> unauthenticated, which only shows public repos.",
+      implementation: "google-rest-api",
+      scopes: [],
+      input: z.object({
+        visibility: z.enum(["all", "public", "private"]).default("all"),
+        perPage: z.number().int().min(1).max(100).default(50),
+      }),
+      run: (_ctx, input) =>
+        githubJson(
+          `user/repos?visibility=${input.visibility}&per_page=${input.perPage}&sort=updated`,
+        ),
+    }),
+    defineCapability({
       id: "github.create_repo",
       title: "Create a new repository",
       description:

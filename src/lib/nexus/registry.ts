@@ -14,6 +14,7 @@ import githubAdapter from "@/integrations/github/index";
 import browserAdapter from "@/integrations/browser/index";
 import replicateAdapter from "@/integrations/replicate/index";
 import huggingfaceAdapter from "@/integrations/huggingface/index";
+import daytonaAdapter from "@/integrations/daytona/index";
 import imagenAdapter from "@/integrations/google/imagen/index";
 import keepAdapter from "@/integrations/google/keep/index";
 import meetAdapter from "@/integrations/google/meet/index";
@@ -55,6 +56,7 @@ export const ADAPTERS: GoogleAdapter[] = [
   browserAdapter,
   replicateAdapter,
   huggingfaceAdapter,
+  daytonaAdapter,
 ];
 
 export function findAdapter(service: string): GoogleAdapter | undefined {
