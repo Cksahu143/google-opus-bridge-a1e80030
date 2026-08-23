@@ -4,19 +4,22 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 
-// UNTESTED — written for review. Requires the login-service companion
-// (see /login-service in repo root, Dockerfile included) to be deployed
-// and reachable at LOGIN_SERVICE_URL below before this page will actually
-// work.
+// UNTESTED — written for review. Requires BROWSERBASE_API_KEY and
+// BROWSERBASE_PROJECT_ID to be set as secrets on the browserbase-login
+// Supabase edge function before this page will actually work (free
+// account at browserbase.com, no card required).
 //
-// This is the FREE / self-hosted version: the actual browser doing the
-// Google login runs in a Docker container you host (Xvfb + Chromium +
-// noVNC), streamed into this page via a plain <iframe>. No third-party
-// browser-automation service, no per-minute cost. The iPad user
-// taps/types inside that iframe exactly like a normal login page.
+// The actual browser doing the Google/NotebookLM login runs on
+// Browserbase's managed infrastructure, streamed into this page via an
+// iframe pointed at their Live View URL. This replaces an earlier
+// self-hosted Docker/Xvfb/noVNC container (login-service/ in the repo
+// root) that was never deployed, so the old version of this page could
+// not actually complete a login. No self-hosting is required now.
 //
-// KNOWN LIMITATION (see login-service/server.js): only one login session
-// can be in progress at a time across the whole deployment.
+// KNOWN LIMITATION: only one login session can be in progress at a time
+// per user (Browserbase's free tier also caps sessions at 15 minutes and
+// ~1 browser-hour/month total — fine for occasional logins, not for
+// anything continuous).
 
 export const Route = createFileRoute("/notebooks/connect")({
   ssr: false,
@@ -33,15 +36,10 @@ export const Route = createFileRoute("/notebooks/connect")({
   component: ConnectNotebookLmPage,
 });
 
-// CONFIRM this matches wherever login-service actually gets deployed —
-// it is a separate service from this TanStack Start app and needs its own
-// hosting (see login-service/README.md).
-const LOGIN_SERVICE_URL =
-  import.meta.env["VITE_NOTEBOOKLM_LOGIN_SERVICE_URL"] ?? "http://localhost:8787";
-
-// Base URL for this project's Supabase Edge Functions, used for the
-// /status and /disconnect calls (both go through notebooklm-connect,
-// authenticated with the signed-in user's own JWT — see authHeader()).
+// Base URL for this project's Supabase Edge Functions. All of /start,
+// /complete, /disconnect and /status go through browserbase-login,
+// authenticated with the signed-in user's own JWT (see authHeader()) —
+// there is no longer a separate, unauthenticated login-service to call.
 const SUPABASE_FUNCTIONS_URL = import.meta.env["VITE_SUPABASE_FUNCTIONS_URL"] ?? "";
 
 type ConnectState =
@@ -57,10 +55,9 @@ type ConnectState =
 function ConnectNotebookLmPage() {
   const [state, setState] = useState<ConnectState>({ step: "checking" });
   const [userId, setUserId] = useState<string | null>(null);
-  // Track the in-flight sessionId so we can cancel it if the user navigates
-  // away mid-login — otherwise the single-session slot on login-service
-  // stays occupied until it eventually times out on its own (no timeout is
-  // currently implemented server-side either — see README known gaps).
+  // Track the in-flight sessionId only so an unmount mid-login doesn't
+  // leave a dangling reference client-side. Browserbase sessions expire on
+  // their own (15 min on the free tier) — there's no cancel call to make.
   const sessionIdRef = useRef<string | null>(null);
 
   async function authHeader(): Promise<Record<string, string>> {
@@ -72,7 +69,7 @@ function ConnectNotebookLmPage() {
   async function checkStatus() {
     try {
       const headers = await authHeader();
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/notebooklm-connect/status`, { headers });
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/status`, { headers });
       if (!res.ok) throw new Error(await res.text());
       const data = (await res.json()) as { status: string; connected_at: string | null };
       setState(
@@ -95,22 +92,6 @@ function ConnectNotebookLmPage() {
     });
   }, []);
 
-  useEffect(() => {
-    return () => {
-      const id = sessionIdRef.current;
-      if (id) {
-        // Best-effort cleanup on unmount; ignore failures since the page is
-        // already closing.
-        fetch(`${LOGIN_SERVICE_URL}/connect/cancel`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: id }),
-          keepalive: true,
-        }).catch(() => {});
-      }
-    };
-  }, []);
-
   async function startConnect() {
     if (!userId) {
       setState({ step: "error", message: "You must be signed in to connect NotebookLM." });
@@ -118,22 +99,12 @@ function ConnectNotebookLmPage() {
     }
     setState({ step: "starting" });
     try {
-      const res = await fetch(`${LOGIN_SERVICE_URL}/connect/start`, {
+      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/start`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
+        headers,
       });
-      if (!res.ok) {
-        // 409 specifically means the single-session slot is occupied — surface
-        // that distinctly since "try again shortly" is actually correct advice
-        // here, unlike a generic failure.
-        const text = await res.text();
-        throw new Error(
-          res.status === 409
-            ? `Someone else is connecting right now — try again in a minute. (${text})`
-            : text,
-        );
-      }
+      if (!res.ok) throw new Error(await res.text());
       const { sessionId, liveViewUrl } = await res.json();
       sessionIdRef.current = sessionId;
       setState({ step: "awaiting-login", sessionId, liveViewUrl });
@@ -145,9 +116,10 @@ function ConnectNotebookLmPage() {
   async function finishConnect(sessionId: string) {
     setState({ step: "completing", sessionId });
     try {
-      const res = await fetch(`${LOGIN_SERVICE_URL}/connect/complete`, {
+      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/complete`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ sessionId }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -162,7 +134,7 @@ function ConnectNotebookLmPage() {
     setState({ step: "disconnecting" });
     try {
       const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/notebooklm-connect/disconnect`, {
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/disconnect`, {
         method: "POST",
         headers,
       });
@@ -210,14 +182,15 @@ function ConnectNotebookLmPage() {
             className="overflow-hidden rounded-lg border border-border"
             style={{ aspectRatio: "16 / 10" }}
           >
-            {/* This iframe loads a REAL, live, self-hosted browser session
-                (Xvfb + Chromium via noVNC). It is not a screenshot — the
-                user can tap/type in it directly. */}
+            {/* Real, live browser session running on Browserbase's
+                infrastructure — not a screenshot. The user can tap/type in
+                it directly, same as any other login page. */}
             <iframe
               src={state.liveViewUrl}
               title="NotebookLM login"
               className="h-full w-full"
               allow="clipboard-write"
+              sandbox="allow-same-origin allow-scripts allow-forms"
             />
           </div>
           <p className="text-sm text-muted-foreground">
