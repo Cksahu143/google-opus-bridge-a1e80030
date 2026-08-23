@@ -96,9 +96,19 @@ function ConnectNotebookLmPage() {
     });
   }, []);
 
+  // Explicit lock, separate from React state: the logs showed two /start
+  // calls firing 0.7s apart from a single interaction, each burning one of
+  // only 3 free-tier concurrent session slots. A ref updates synchronously,
+  // unlike setState, so this actually blocks the second call rather than
+  // hoping the button disables in time.
+  const startInFlightRef = useRef(false);
+
   async function startConnect() {
+    if (startInFlightRef.current) return;
+    startInFlightRef.current = true;
     if (!userId) {
       setState({ step: "error", message: "You must be signed in to connect NotebookLM." });
+      startInFlightRef.current = false;
       return;
     }
     setState({ step: "starting" });
@@ -126,6 +136,8 @@ function ConnectNotebookLmPage() {
       setState({ step: "awaiting-login", sessionId, liveViewUrl });
     } catch (err) {
       setState({ step: "error", message: String((err as Error)?.message ?? err) });
+    } finally {
+      startInFlightRef.current = false;
     }
   }
 

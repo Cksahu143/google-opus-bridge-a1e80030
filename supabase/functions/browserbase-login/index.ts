@@ -71,6 +71,27 @@ function bbHeaders(): Record<string, string> {
   return { "X-BB-API-Key": BROWSERBASE_API_KEY, "Content-Type": "application/json" };
 }
 
+// Closes an active session immediately instead of waiting out its 15-minute
+// free-tier timeout. Confirmed against Browserbase's own docs: POST
+// /v1/sessions/{id} with status: "REQUEST_RELEASE". Without this, every
+// single login attempt permanently consumes one of the free tier's 3
+// concurrent-session slots until it naturally expires — which is exactly
+// what filled all 3 slots during testing tonight.
+async function closeSession(sessionId: string): Promise<void> {
+  try {
+    const res = await fetch(`${BROWSERBASE_API}/sessions/${sessionId}`, {
+      method: "POST",
+      headers: bbHeaders(),
+      body: JSON.stringify({ projectId: BROWSERBASE_PROJECT_ID, status: "REQUEST_RELEASE" }),
+    });
+    if (!res.ok) {
+      console.error(`Failed to close session ${sessionId}: ${res.status} ${await res.text()}`);
+    }
+  } catch (err) {
+    console.error(`Error closing session ${sessionId}:`, err);
+  }
+}
+
 
 async function requireUser(req: Request) {
   const authHeader = req.headers.get("Authorization");
@@ -235,6 +256,13 @@ serve(async (req) => {
       if (!res.ok) {
         throw new Error(`Could not verify Browserbase session: ${res.status} ${await res.text()}`);
       }
+
+      // The login is already captured in the persistent Context by this
+      // point (persist: true on /start) — the live session itself is no
+      // longer needed. Close it now rather than leaving it running for up
+      // to 15 more minutes, consuming one of only 3 free-tier concurrent
+      // session slots for no reason.
+      await closeSession(sessionId);
 
       const { error: upsertError } = await supabase.from("notebooklm_connections").upsert(
         {
