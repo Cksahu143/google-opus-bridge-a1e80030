@@ -75,10 +75,10 @@ function bbHeaders(): Record<string, string> {
 async function requireUser(req: Request) {
   const authHeader = req.headers.get("Authorization");
   const jwt = authHeader?.replace(/^Bearer\s+/i, "");
-  if (!jwt) return { error: new Response(JSON.stringify({ error: "Missing Authorization header" }), { status: 401 }) };
+  if (!jwt) return { error: json({ error: "Missing Authorization header" }, 401) };
   const { data, error } = await supabase.auth.getUser(jwt);
   if (error || !data?.user) {
-    return { error: new Response(JSON.stringify({ error: "Invalid or expired session" }), { status: 401 }) };
+    return { error: json({ error: "Invalid or expired session" }, 401) };
   }
   return { user: data.user };
 }
