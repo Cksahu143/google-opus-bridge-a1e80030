@@ -40,7 +40,11 @@ export const Route = createFileRoute("/notebooks/connect")({
 // /complete, /disconnect and /status go through browserbase-login,
 // authenticated with the signed-in user's own JWT (see authHeader()) —
 // there is no longer a separate, unauthenticated login-service to call.
-const SUPABASE_FUNCTIONS_URL = import.meta.env["VITE_SUPABASE_FUNCTIONS_URL"] ?? "";
+// Derived from the project's Supabase URL so there is no extra env var to
+// forget (VITE_SUPABASE_FUNCTIONS_URL still wins if it's set explicitly).
+const SUPABASE_FUNCTIONS_URL =
+  (import.meta.env["VITE_SUPABASE_FUNCTIONS_URL"] as string | undefined) ??
+  `${(import.meta.env["VITE_SUPABASE_URL"] as string | undefined) ?? ""}/functions/v1`;
 
 type ConnectState =
   | { step: "checking" }
