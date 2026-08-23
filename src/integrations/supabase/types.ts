@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      browserbase_contexts: {
+        Row: {
+          context_id: string
+          created_at: string
+          purpose: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          context_id: string
+          created_at?: string
+          purpose: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          context_id?: string
+          created_at?: string
+          purpose?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       generation_jobs: {
         Row: {
           actor: string
