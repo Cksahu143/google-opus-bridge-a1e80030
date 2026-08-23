@@ -206,6 +206,7 @@ serve(async (req) => {
         debug.pages?.[0]?.debuggerFullscreenUrl ??
         debug.pages?.[0]?.debuggerUrl;
       if (!liveViewUrl) {
+        console.error("Browserbase /debug returned no usable URL. Raw response:", JSON.stringify(debug));
         throw new Error("Browserbase returned no live view URL for this session.");
       }
 

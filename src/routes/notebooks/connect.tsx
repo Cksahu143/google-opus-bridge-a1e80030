@@ -110,6 +110,18 @@ function ConnectNotebookLmPage() {
       });
       if (!res.ok) throw new Error(await res.text());
       const { sessionId, liveViewUrl } = await res.json();
+      if (!liveViewUrl || typeof liveViewUrl !== "string") {
+        // This is the actual "about:blank" bug: previously we'd set
+        // liveViewUrl into state even if it came back empty/undefined,
+        // and <iframe src={undefined}> silently renders about:blank with
+        // no visible error at all. Fail loudly instead.
+        throw new Error(
+          "Browserbase did not return a live view URL. Check that BROWSERBASE_API_KEY and " +
+            "BROWSERBASE_PROJECT_ID are set as secrets on the browserbase-login Edge Function " +
+            "specifically (Supabase dashboard → Edge Functions → browserbase-login → Secrets) " +
+            "— a Lovable frontend env var alone is not visible to this function.",
+        );
+      }
       sessionIdRef.current = sessionId;
       setState({ step: "awaiting-login", sessionId, liveViewUrl });
     } catch (err) {
@@ -194,7 +206,7 @@ function ConnectNotebookLmPage() {
               title="NotebookLM login"
               className="h-full w-full"
               allow="clipboard-write"
-              sandbox="allow-same-origin allow-scripts allow-forms"
+              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
             />
           </div>
           <p className="text-sm text-muted-foreground">
