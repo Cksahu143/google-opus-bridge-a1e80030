@@ -1,27 +1,50 @@
 import { z } from "zod";
 
 import { NexusError } from "@/lib/nexus/errors";
-import { defineAdapter, defineCapability, type AdapterContext } from "@/lib/nexus/types";
+import { defineAdapter, defineCapability } from "@/lib/nexus/types";
 
 /**
- * Free NotebookLM integration backed by the MIT-licensed community
- * `notebooklm-mcp` project. NotebookLM has no public consumer API, so this
- * adapter talks to that MCP server over its documented Streamable HTTP
- * transport. Authentication happens in the user's own Chrome profile via
- * the MCP server's setup_auth tool; passwords are never handled by Nexus.
+ * Free NotebookLM integration backed by the MIT-licensed notebooklm-mcp
+ * community bridge. NotebookLM has no public consumer API, so this adapter
+ * talks to the MCP server over Streamable HTTP.
  *
- * Start locally with:
- *   npx notebooklm-mcp@latest --transport http --port 3000
- * and set NOTEBOOKLM_MCP_URL=http://127.0.0.1:3000/mcp
+ * Remote-first configuration:
+ *   NOTEBOOKLM_MCP_URL=https://your-host.example/mcp
+ *   NOTEBOOKLM_MCP_BEARER_TOKEN=...
+ *
+ * A local endpoint is intentionally NOT used by default. For development,
+ * localhost is allowed only when explicitly configured. Google passwords and
+ * browser cookies are never handled by Nexus.
  */
 
-const DEFAULT_URL = "http://127.0.0.1:3000/mcp";
 const PROTOCOL_VERSION = "2025-06-18";
-
+const REQUEST_TIMEOUT_MS = 30_000;
 type Json = Record<string, unknown>;
 
 function endpoint(): string {
-  return process.env.NOTEBOOKLM_MCP_URL?.trim() || DEFAULT_URL;
+  const value = process.env.NOTEBOOKLM_MCP_URL?.trim();
+  if (!value) {
+    throw new NexusError(
+      "notebooklm_not_configured",
+      "NOTEBOOKLM_MCP_URL is required. Configure a remote HTTPS NotebookLM MCP endpoint; no localhost default is used.",
+      503,
+    );
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new NexusError("notebooklm_invalid_url", "NOTEBOOKLM_MCP_URL must be a valid URL.", 500);
+  }
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  if (url.protocol !== "https:" && !(local && process.env.NODE_ENV !== "production")) {
+    throw new NexusError(
+      "notebooklm_insecure_endpoint",
+      "Remote NotebookLM MCP endpoints must use HTTPS. HTTP is permitted only for explicitly configured local development.",
+      500,
+    );
+  }
+  return url.toString();
 }
 
 function headers(sessionId?: string): Record<string, string> {
@@ -31,6 +54,15 @@ function headers(sessionId?: string): Record<string, string> {
   };
   if (sessionId) result["Mcp-Session-Id"] = sessionId;
   const token = process.env.NOTEBOOKLM_MCP_BEARER_TOKEN?.trim();
+  const url = new URL(endpoint());
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  if (!local && !token) {
+    throw new NexusError(
+      "notebooklm_auth_not_configured",
+      "NOTEBOOKLM_MCP_BEARER_TOKEN is required for remote NotebookLM MCP endpoints.",
+      503,
+    );
+  }
   if (token) result.authorization = `Bearer ${token}`;
   return result;
 }
@@ -63,49 +95,60 @@ async function parseResponse(response: Response): Promise<{ body: Json; sessionI
   }
 }
 
-async function mcpCall(method: string, params: Json = {}): Promise<Json> {
-  const url = endpoint();
-  const initializeId = crypto.randomUUID();
-  const init = await fetch(url, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: initializeId,
-      method: "initialize",
-      params: {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "google-opus-bridge", version: "1.0.0" },
-      },
-    }),
-  });
-  if (!init.ok) {
+async function postJson(url: string, body: Json, sessionId?: string): Promise<{ body: Json; sessionId?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: headers(sessionId),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new NexusError(
+        "notebooklm_mcp_http_error",
+        `NotebookLM MCP returned HTTP ${response.status}.`,
+        response.status >= 500 ? 502 : response.status,
+      );
+    }
+    return await parseResponse(response);
+  } catch (error) {
+    if (error instanceof NexusError) throw error;
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new NexusError("notebooklm_mcp_timeout", `NotebookLM MCP request timed out after ${REQUEST_TIMEOUT_MS}ms.`, 504);
+    }
     throw new NexusError(
       "notebooklm_mcp_unreachable",
-      `NotebookLM MCP is unavailable at ${url} (HTTP ${init.status}). Start notebooklm-mcp in HTTP mode or change NOTEBOOKLM_MCP_URL.`,
-      init.status >= 500 ? 502 : init.status,
+      `Unable to reach the configured NotebookLM MCP endpoint: ${error instanceof Error ? error.message : String(error)}`,
+      502,
     );
+  } finally {
+    clearTimeout(timer);
   }
-  const initialized = await parseResponse(init);
+}
+
+async function mcpCall(method: string, params: Json = {}): Promise<Json> {
+  const url = endpoint();
+  const initialized = await postJson(url, {
+    jsonrpc: "2.0",
+    id: crypto.randomUUID(),
+    method: "initialize",
+    params: {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "google-opus-bridge", version: "1.2.0" },
+    },
+  });
   const sessionId = initialized.sessionId;
 
-  const callId = crypto.randomUUID();
-  const response = await fetch(url, {
-    method: "POST",
-    headers: headers(sessionId),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: callId,
-      method: "tools/call",
-      params: { name: method, arguments: params },
-    }),
-  });
-  if (!response.ok) {
-    throw new NexusError("notebooklm_mcp_call_failed", `NotebookLM MCP returned HTTP ${response.status}.`, response.status);
-  }
-  const parsed = await parseResponse(response);
-  const result = parsed.body.result as Json | undefined;
+  const parsed = await postJson(url, {
+    jsonrpc: "2.0",
+    id: crypto.randomUUID(),
+    method: "tools/call",
+    params: { name: method, arguments: params },
+  }, sessionId);
+
   if (parsed.body.error) {
     const error = parsed.body.error as Json;
     throw new NexusError(
@@ -115,13 +158,13 @@ async function mcpCall(method: string, params: Json = {}): Promise<Json> {
       error,
     );
   }
+  const result = parsed.body.result as Json | undefined;
   if (!result) throw new NexusError("notebooklm_mcp_empty_result", "NotebookLM MCP returned no tool result.");
   return result;
 }
 
 function unwrap(result: Json): unknown {
-  const structured = result.structuredContent;
-  if (structured !== undefined) return structured;
+  if (result.structuredContent !== undefined) return result.structuredContent;
   const content = result.content;
   if (Array.isArray(content)) {
     const textParts = content
@@ -137,16 +180,16 @@ function unwrap(result: Json): unknown {
 
 export const notebooklmNativeAdapter = defineAdapter({
   service: "notebooklm-native",
-  label: "NotebookLM (free MCP bridge)",
-  description: "Connect Nexus to a locally running NotebookLM MCP server using the free NotebookLM web experience and browser-session authentication.",
+  label: "NotebookLM (remote MCP)",
+  description: "Connect Nexus to a remotely hosted NotebookLM MCP server using secure Streamable HTTP and bearer authentication.",
   status: "requires-configuration",
-  statusNote: "Uses the MIT-licensed notebooklm-mcp community bridge. No NotebookLM consumer API key is required. The user authenticates in Chrome through setup_auth; Nexus never receives the Google password.",
+  statusNote: "Set NOTEBOOKLM_MCP_URL to an HTTPS MCP endpoint and NOTEBOOKLM_MCP_BEARER_TOKEN to its access token. No Google password or browser cookie is handled by Nexus.",
   docsUrl: "https://github.com/PleasePrompto/notebooklm-mcp",
   capabilities: [
     defineCapability({
       id: "notebooklm.get_health",
       title: "Check NotebookLM authentication",
-      description: "Return the local NotebookLM MCP server health and whether the Google session is authenticated.",
+      description: "Return the remote NotebookLM MCP server health/authentication status.",
       implementation: "notebooklm-mcp",
       scopes: [],
       input: z.object({}),
@@ -155,19 +198,17 @@ export const notebooklmNativeAdapter = defineAdapter({
     defineCapability({
       id: "notebooklm.setup_auth",
       title: "Authenticate NotebookLM",
-      description: "Open the NotebookLM MCP browser login flow. The user completes Google sign-in in Chrome; passwords are never passed to Nexus.",
+      description: "Start the NotebookLM MCP browser authentication flow on the remote MCP host.",
       implementation: "notebooklm-mcp",
       scopes: [],
       mutating: true,
-      input: z.object({
-        showBrowser: z.boolean().default(true),
-      }),
+      input: z.object({ showBrowser: z.boolean().default(true) }),
       run: async (_ctx, input) => unwrap(await mcpCall("setup_auth", { show_browser: input.showBrowser })),
     }),
     defineCapability({
       id: "notebooklm.re_auth",
       title: "Re-authenticate NotebookLM",
-      description: "Reset the NotebookLM MCP browser session and start a fresh Google login.",
+      description: "Reset the remote NotebookLM browser session and begin a fresh authentication flow.",
       implementation: "notebooklm-mcp",
       scopes: [],
       mutating: true,
@@ -195,7 +236,7 @@ export const notebooklmNativeAdapter = defineAdapter({
     defineCapability({
       id: "notebooklm.ask",
       title: "Ask NotebookLM",
-      description: "Ask a question against a real NotebookLM notebook, preserving NotebookLM's own grounding and citations.",
+      description: "Ask a question against a real NotebookLM notebook with NotebookLM grounding/citations.",
       implementation: "notebooklm-mcp",
       scopes: [],
       input: z.object({
@@ -249,7 +290,7 @@ export const notebooklmNativeAdapter = defineAdapter({
     defineCapability({
       id: "notebooklm.download_audio",
       title: "Download a NotebookLM Audio Overview",
-      description: "Download the most recent generated Audio Overview to a local path on the machine running the MCP bridge.",
+      description: "Download the latest Audio Overview through the remote MCP server.",
       implementation: "notebooklm-mcp",
       scopes: [],
       mutating: true,
