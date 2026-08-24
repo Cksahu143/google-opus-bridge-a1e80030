@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 
 // UNTESTED — written for review. Requires BROWSERBASE_API_KEY and
@@ -20,6 +21,16 @@ import { supabase } from "@/integrations/supabase/client";
 // per user (Browserbase's free tier also caps sessions at 15 minutes and
 // ~1 browser-hour/month total — fine for occasional logins, not for
 // anything continuous).
+//
+// iPad/iPhone typing: iOS/iPadOS Safari will not raise its virtual
+// keyboard for an element inside the live-view iframe -- there's no local
+// DOM input for it to attach to, since the actual login form lives inside
+// Browserbase's remote browser, not on the device. The "Type into
+// browser" box below is a real local input (so iOS *will* show a
+// keyboard for it); typing there and tapping Send forwards the text into
+// whatever field is currently focused in the live view via the backend's
+// CDP bridge. Tap the field in the live view first to focus it, same as
+// any login form.
 
 export const Route = createFileRoute("/notebooks/connect")({
   ssr: false,
@@ -37,7 +48,7 @@ export const Route = createFileRoute("/notebooks/connect")({
 });
 
 // Base URL for this project's Supabase Edge Functions. All of /start,
-// /complete, /disconnect and /status go through browserbase-login,
+// /type, /complete, /disconnect and /status go through browserbase-login,
 // authenticated with the signed-in user's own JWT (see authHeader()) —
 // there is no longer a separate, unauthenticated login-service to call.
 // Derived from the project's Supabase URL so there is no extra env var to
@@ -63,6 +74,11 @@ function ConnectNotebookLmPage() {
   // leave a dangling reference client-side. Browserbase sessions expire on
   // their own (15 min on the free tier) — there's no cancel call to make.
   const sessionIdRef = useRef<string | null>(null);
+
+  // Local "type into browser" box state -- see the file header comment on
+  // why this exists (iOS won't show a keyboard for the remote page).
+  const [typeValue, setTypeValue] = useState("");
+  const [typing, setTyping] = useState(false);
 
   async function authHeader(): Promise<Record<string, string>> {
     const { data } = await supabase.auth.getSession();
@@ -141,6 +157,31 @@ function ConnectNotebookLmPage() {
     }
   }
 
+  // Forwards the local text box's value into the remote page's currently
+  // focused field, and optionally presses Enter. See the file header
+  // comment for why this exists (iOS won't raise a keyboard inside the
+  // live-view iframe). Clears the box afterward so it's ready for the
+  // next field (e.g. password, after email).
+  async function sendTypedText(pressEnter: boolean) {
+    if (state.step !== "awaiting-login") return;
+    if (!typeValue && !pressEnter) return;
+    setTyping(true);
+    try {
+      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/type`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sessionId: state.sessionId, text: typeValue, pressEnter }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setTypeValue("");
+    } catch (err) {
+      setState({ step: "error", message: String((err as Error)?.message ?? err) });
+    } finally {
+      setTyping(false);
+    }
+  }
+
   async function finishConnect(sessionId: string) {
     setState({ step: "completing", sessionId });
     try {
@@ -184,9 +225,7 @@ function ConnectNotebookLmPage() {
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
           This connects your real NotebookLM account (not the separate Nexus-managed notebooks used
-          elsewhere in this app). You&apos;ll log into Google in the embedded window below — works
-          the same on iPad, iPhone, or desktop, since it&apos;s a regular web page, not a native
-          login.
+          elsewhere in this app). You&apos;ll log into Google in the embedded window below.
         </p>
       </div>
 
@@ -211,8 +250,9 @@ function ConnectNotebookLmPage() {
             style={{ aspectRatio: "16 / 10" }}
           >
             {/* Real, live browser session running on Browserbase's
-                infrastructure — not a screenshot. The user can tap/type in
-                it directly, same as any other login page. */}
+                infrastructure — not a screenshot. Tap fields to focus them;
+                on iPad/iPhone, type into the box below instead of directly
+                in this iframe (see "Can't type?" note below it). */}
             <iframe
               src={state.liveViewUrl}
               title="NotebookLM login"
@@ -221,11 +261,51 @@ function ConnectNotebookLmPage() {
               sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
             />
           </div>
+
+          <div className="space-y-2 rounded-lg border border-border p-3">
+            <p className="text-xs font-medium text-muted-foreground">
+              Can&apos;t type in the window above? (Common on iPad/iPhone.) Tap the field you want to
+              fill in the login window first, then type it here instead:
+            </p>
+            <div className="flex gap-2">
+              <Input
+                type="text"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                placeholder="Type your email or password here…"
+                value={typeValue}
+                onChange={(e) => setTypeValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void sendTypedText(true);
+                  }
+                }}
+                disabled={typing}
+              />
+              <Button type="button" variant="secondary" onClick={() => void sendTypedText(false)} disabled={typing || !typeValue}>
+                Send
+              </Button>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => void sendTypedText(true)}
+              disabled={typing}
+            >
+              Press Enter / Next
+            </Button>
+          </div>
+
           <p className="text-sm text-muted-foreground">
             Log into your Google account above. Once you see your NotebookLM notebooks load inside
             the window, tap the button below.
           </p>
-          <Button onClick={() => finishConnect(state.sessionId)}>I&apos;m done logging in</Button>
+          <Button type="button" onClick={() => finishConnect(state.sessionId)}>
+            I&apos;m done logging in
+          </Button>
         </div>
       )}
 
@@ -240,7 +320,7 @@ function ConnectNotebookLmPage() {
             {state.connectedAt ? ` — since ${new Date(state.connectedAt).toLocaleString()}` : ""}.
             Claude can now create and manage your real notebooks.
           </p>
-          <Button variant="outline" onClick={disconnect}>
+          <Button type="button" variant="outline" onClick={disconnect}>
             Disconnect NotebookLM
           </Button>
         </div>
