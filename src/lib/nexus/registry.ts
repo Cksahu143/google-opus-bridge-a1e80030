@@ -20,6 +20,7 @@ import keepAdapter from "@/integrations/google/keep/index";
 import meetAdapter from "@/integrations/google/meet/index";
 import musicAdapter from "@/integrations/google/music/index";
 import notebooklmAdapter from "@/integrations/google/notebooklm/index";
+import notebooklmNativeAdapter from "@/integrations/google/notebooklm-native/index";
 import notebookEnterpriseAdapter from "@/integrations/google/notebook-enterprise/index";
 import sheetsAdapter from "@/integrations/google/sheets/index";
 import slidesAdapter from "@/integrations/google/slides/index";
@@ -34,7 +35,7 @@ export const ADAPTERS: GoogleAdapter[] = [
   gmailAdapter, driveAdapter, driveActivityAdapter, docsAdapter, sheetsAdapter, slidesAdapter,
   calendarAdapter, tasksAdapter, contactsAdapter, meetAdapter, chatAdapter, formsAdapter,
   appsScriptAdapter, classroomAdapter, youtubeAdapter, keepAdapter, geminiAdapter, imagenAdapter,
-  veoAdapter, musicAdapter, flowAdapter, notebooklmAdapter, notebookEnterpriseAdapter,
+  veoAdapter, musicAdapter, flowAdapter, notebooklmAdapter, notebooklmNativeAdapter, notebookEnterpriseAdapter,
   cloudAiAdapter, cloudDataAdapter, githubAdapter, browserAdapter, replicateAdapter, huggingfaceAdapter, daytonaAdapter,
 ];
 
