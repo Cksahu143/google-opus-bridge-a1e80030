@@ -27,14 +27,15 @@ import tasksAdapter from "@/integrations/google/tasks/index";
 import veoAdapter from "@/integrations/google/veo/index";
 import youtubeAdapter from "@/integrations/google/youtube/index";
 import cloudAiAdapter from "@/integrations/google/cloud-ai/index";
+import cloudDataAdapter from "@/integrations/google/cloud-data/index";
 import type { Capability, GoogleAdapter } from "./types";
 
 export const ADAPTERS: GoogleAdapter[] = [
   gmailAdapter, driveAdapter, driveActivityAdapter, docsAdapter, sheetsAdapter, slidesAdapter,
   calendarAdapter, tasksAdapter, contactsAdapter, meetAdapter, chatAdapter, formsAdapter,
   appsScriptAdapter, classroomAdapter, youtubeAdapter, keepAdapter, geminiAdapter, imagenAdapter,
-  veoAdapter, musicAdapter, flowAdapter, notebooklmAdapter, notebookEnterpriseAdapter, cloudAiAdapter,
-  githubAdapter, browserAdapter, replicateAdapter, huggingfaceAdapter, daytonaAdapter,
+  veoAdapter, musicAdapter, flowAdapter, notebooklmAdapter, notebookEnterpriseAdapter,
+  cloudAiAdapter, cloudDataAdapter, githubAdapter, browserAdapter, replicateAdapter, huggingfaceAdapter, daytonaAdapter,
 ];
 
 export function findAdapter(service: string): GoogleAdapter | undefined { return ADAPTERS.find((adapter) => adapter.service === service); }
