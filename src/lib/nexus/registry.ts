@@ -25,63 +25,33 @@ import slidesAdapter from "@/integrations/google/slides/index";
 import tasksAdapter from "@/integrations/google/tasks/index";
 import veoAdapter from "@/integrations/google/veo/index";
 import youtubeAdapter from "@/integrations/google/youtube/index";
+import cloudAiAdapter from "@/integrations/google/cloud-ai/index";
 
 import type { Capability, GoogleAdapter } from "./types";
 
-/** Every adapter Google Nexus exposes, in dashboard order. */
 export const ADAPTERS: GoogleAdapter[] = [
-  gmailAdapter,
-  driveAdapter,
-  driveActivityAdapter,
-  docsAdapter,
-  sheetsAdapter,
-  slidesAdapter,
-  calendarAdapter,
-  tasksAdapter,
-  contactsAdapter,
-  meetAdapter,
-  chatAdapter,
-  formsAdapter,
-  appsScriptAdapter,
-  classroomAdapter,
-  youtubeAdapter,
-  keepAdapter,
-  geminiAdapter,
-  imagenAdapter,
-  veoAdapter,
-  musicAdapter,
-  flowAdapter,
-  notebooklmAdapter,
-  githubAdapter,
-  browserAdapter,
-  replicateAdapter,
-  huggingfaceAdapter,
-  daytonaAdapter,
+  gmailAdapter, driveAdapter, driveActivityAdapter, docsAdapter, sheetsAdapter, slidesAdapter,
+  calendarAdapter, tasksAdapter, contactsAdapter, meetAdapter, chatAdapter, formsAdapter,
+  appsScriptAdapter, classroomAdapter, youtubeAdapter, keepAdapter, geminiAdapter, imagenAdapter,
+  veoAdapter, musicAdapter, flowAdapter, notebooklmAdapter, cloudAiAdapter, githubAdapter,
+  browserAdapter, replicateAdapter, huggingfaceAdapter, daytonaAdapter,
 ];
 
 export function findAdapter(service: string): GoogleAdapter | undefined {
   return ADAPTERS.find((adapter) => adapter.service === service);
 }
 
-export function allCapabilities(): {
-  adapter: GoogleAdapter;
-  capability: Capability<never, unknown>;
-}[] {
-  return ADAPTERS.flatMap((adapter) =>
-    adapter.capabilities.map((capability) => ({ adapter, capability })),
-  );
+export function allCapabilities(): { adapter: GoogleAdapter; capability: Capability<never, unknown> }[] {
+  return ADAPTERS.flatMap((adapter) => adapter.capabilities.map((capability) => ({ adapter, capability })));
 }
 
 export function findCapability(id: string) {
   return allCapabilities().find((entry) => entry.capability.id === id);
 }
 
-/** All OAuth scopes Nexus asks Google for, across every adapter. */
 export function allRequiredScopes(): string[] {
   const set = new Set<string>();
-  for (const { capability } of allCapabilities()) {
-    for (const scope of capability.scopes) set.add(scope);
-  }
+  for (const { capability } of allCapabilities()) for (const scope of capability.scopes) set.add(scope);
   return Array.from(set).sort();
 }
 
@@ -98,7 +68,6 @@ export interface CapabilitySummary {
   inputSchema: { type: string; fields?: string[] };
 }
 
-/** Machine-readable catalog for the dashboard and the MCP `list_capabilities` tool. */
 export function capabilityCatalog(): CapabilitySummary[] {
   return allCapabilities().map(({ adapter, capability }) => ({
     id: capability.id,
@@ -114,18 +83,8 @@ export function capabilityCatalog(): CapabilitySummary[] {
   }));
 }
 
-function describeSchema(capability: Capability<never, unknown>): {
-  type: string;
-  fields?: string[];
-} {
-  // Zod schemas are not JSON-serializable; expose a light shape hint instead.
-  const shape = (
-    capability.input as unknown as { _def?: { shape?: () => Record<string, unknown> } }
-  )._def?.shape;
+function describeSchema(capability: Capability<never, unknown>): { type: string; fields?: string[] } {
+  const shape = (capability.input as unknown as { _def?: { shape?: () => Record<string, unknown> } })._def?.shape;
   if (typeof shape !== "function") return { type: "object" };
-  try {
-    return { type: "object", fields: Object.keys(shape()) };
-  } catch {
-    return { type: "object" };
-  }
+  try { return { type: "object", fields: Object.keys(shape()) }; } catch { return { type: "object" }; }
 }
