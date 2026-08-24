@@ -16,9 +16,19 @@
 //      encrypted at rest, keyed by an opaque context id. We only ever
 //      store that id (in browserbase_contexts), never any cookie or
 //      credential material ourselves.
-//   3. /complete just confirms the session actually ran and flips the
+//   3. /type exists because iOS/iPadOS Safari will not raise its virtual
+//      keyboard for an element inside a remote/screencast iframe -- there
+//      is no local DOM input for it to attach to, since the actual login
+//      form lives inside Browserbase's remote Chrome instance, not on the
+//      device. connect.tsx gives the user a real local text box instead
+//      (which iPadOS *will* raise a keyboard for) and this endpoint
+//      forwards whatever they type into the remote page's focused field
+//      via CDP Input.insertText, which is designed for exactly this kind
+//      of non-keystroke text insertion (it's the same mechanism used for
+//      emoji-keyboard/IME input).
+//   4. /complete just confirms the session actually ran and flips the
 //      user to "connected" in notebooklm_connections.
-//   4. Future automated NotebookLM actions would start a *new* session
+//   5. Future automated NotebookLM actions would start a *new* session
 //      reusing the same context id (persist: true) to resume the login --
 //      that reuse path is not implemented here since nothing in this repo
 //      yet drives NotebookLM automation against it; this function only
@@ -95,24 +105,28 @@ async function closeSession(sessionId: string): Promise<void> {
   }
 }
 
-// THE ACTUAL FIX for the "live view shows about:blank" bug: a freshly
-// created Browserbase session's default tab is a blank page — nothing
-// navigates it anywhere on its own. Browserbase's own examples always
-// call page.goto() via Playwright/Puppeteer immediately after creating a
-// session, before reading the debug URL, for exactly this reason. This
-// does the equivalent over raw CDP (no Playwright dependency available in
-// a Deno edge function): attach to the session's one open page target and
-// send Page.navigate.
-//
-// IMPORTANT: this WebSocket is deliberately left open (not ws.close()'d)
-// after navigating. Closing it immediately caused the Live View iframe to
-// show "WebSocket disconnected" -- every official Browserbase example
-// (Playwright's chromium.connectOverCDP, etc.) keeps this connection open
-// for the life of the session rather than attaching-and-detaching, so a
-// deliberate detach right after Page.navigate appears to tear down state
-// the Live View's own connection depends on. The socket is left to close
-// naturally when this function's Deno isolate is later recycled.
-async function navigateSession(connectUrl: string, targetUrl: string): Promise<void> {
+// Re-fetches a session's connectUrl. Needed because each edge function
+// invocation is a fresh, short-lived isolate -- the CDP connection opened
+// during /start does not survive into a later /type request, so /type has
+// to reconnect. GET /v1/sessions/{id} includes the same connectUrl the
+// create-session response does.
+async function getSessionConnectUrl(sessionId: string): Promise<string> {
+  const res = await fetch(`${BROWSERBASE_API}/sessions/${sessionId}`, { headers: bbHeaders() });
+  if (!res.ok) {
+    throw new Error(`Failed to look up session ${sessionId}: ${res.status} ${await res.text()}`);
+  }
+  const { connectUrl } = (await res.json()) as { connectUrl?: string };
+  if (!connectUrl) throw new Error(`Session ${sessionId} has no connectUrl (already closed?)`);
+  return connectUrl;
+}
+
+// Minimal hand-rolled CDP client (no Playwright dependency available in a
+// Deno edge function). Opens connectUrl, attaches to the session's one
+// page target, and returns helpers scoped to that page's CDP session so
+// callers can send multiple commands (e.g. insertText then a keypress)
+// over one connection. The caller decides whether/when to close it -- see
+// navigateSession's comment on why an immediate close broke the Live View.
+async function attachToPage(connectUrl: string) {
   const ws = new WebSocket(connectUrl);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
@@ -148,16 +162,64 @@ async function navigateSession(connectUrl: string, targetUrl: string): Promise<v
   const targetsRes = await waitFor(send("Target.getTargets"));
   const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
   const pageTarget = targetInfos.find((t) => t.type === "page");
-  if (!pageTarget) throw new Error("No page target found on the new Browserbase session");
+  if (!pageTarget) throw new Error("No page target found on the Browserbase session");
 
   const attachRes = await waitFor(
     send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
   );
-  const sessionId = attachRes.result?.["sessionId"] as string | undefined;
-  if (!sessionId) throw new Error("Failed to attach to the Browserbase session's page target");
+  const pageSessionId = attachRes.result?.["sessionId"] as string | undefined;
+  if (!pageSessionId) throw new Error("Failed to attach to the Browserbase session's page target");
 
-  await waitFor(send("Page.navigate", { url: targetUrl }, sessionId));
-  // Deliberately no ws.close() here -- see the comment above the function.
+  return {
+    ws,
+    command: (method: string, params: Record<string, unknown> = {}) =>
+      waitFor(send(method, params, pageSessionId)),
+  };
+}
+
+// THE FIX for the "live view shows about:blank" bug: a freshly created
+// Browserbase session's default tab is a blank page — nothing navigates it
+// anywhere on its own. Browserbase's own examples always call page.goto()
+// via Playwright/Puppeteer immediately after creating a session, before
+// reading the debug URL, for exactly this reason.
+//
+// IMPORTANT: deliberately does not ws.close() when done. Closing it
+// immediately caused the Live View iframe to show "WebSocket disconnected"
+// -- every official Browserbase example keeps this connection open for the
+// life of the session rather than attaching-and-detaching, so a deliberate
+// detach right after navigating appears to tear down state the Live View's
+// own connection depends on. Left to close naturally when this function's
+// Deno isolate is later recycled.
+async function navigateSession(connectUrl: string, targetUrl: string): Promise<void> {
+  const page = await attachToPage(connectUrl);
+  await page.command("Page.navigate", { url: targetUrl });
+}
+
+// Types text into whatever element is currently focused in the remote
+// page, using CDP's Input.insertText -- the same mechanism Chrome uses
+// for IME/emoji-keyboard input, i.e. text that doesn't come from raw
+// keystrokes. This exists specifically to work around iOS/iPadOS Safari
+// not raising a virtual keyboard for elements inside a remote/screencast
+// iframe (see the file header comment). The user still has to tap the
+// field once in the Live View to focus it -- taps/clicks are forwarded
+// fine by Browserbase's own Live View, it's only the OS keyboard that
+// doesn't appear.
+async function typeIntoSession(connectUrl: string, text: string, pressEnter: boolean): Promise<void> {
+  const page = await attachToPage(connectUrl);
+  if (text) {
+    await page.command("Input.insertText", { text });
+  }
+  if (pressEnter) {
+    const enterParams = {
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13,
+      text: "\r",
+    };
+    await page.command("Input.dispatchKeyEvent", { type: "keyDown", ...enterParams });
+    await page.command("Input.dispatchKeyEvent", { type: "keyUp", ...enterParams });
+  }
 }
 
 async function requireUser(req: Request) {
@@ -317,6 +379,39 @@ serve(async (req) => {
       return json({ sessionId: session.id, liveViewUrl });
     } catch (err) {
       console.error("browserbase-login /start failed:", err);
+      return json({ error: String((err as Error)?.message ?? err) }, 500);
+    }
+  }
+
+  // --- POST /type  { sessionId, text, pressEnter? } ---
+  // Forwards locally-typed text into the remote session's currently
+  // focused field (see typeIntoSession's comment for why this exists).
+  // Not fatal to the connect flow if this specific call fails -- the user
+  // can still use an external keyboard or a desktop browser as a fallback,
+  // so a clear error here beats losing the whole session.
+  if (req.method === "POST" && path === "/type") {
+    const { user, error } = await requireUser(req);
+    if (error) return error;
+
+    const body = await req.json().catch(() => ({}));
+    const { sessionId, text, pressEnter } = body as {
+      sessionId?: string;
+      text?: string;
+      pressEnter?: boolean;
+    };
+    if (!sessionId) {
+      return json({ error: "sessionId is required" }, 400);
+    }
+    if (!text && !pressEnter) {
+      return json({ error: "Provide text and/or pressEnter" }, 400);
+    }
+
+    try {
+      const connectUrl = await getSessionConnectUrl(sessionId);
+      await typeIntoSession(connectUrl, text ?? "", Boolean(pressEnter));
+      return json({ ok: true });
+    } catch (err) {
+      console.error("browserbase-login /type failed:", err);
       return json({ error: String((err as Error)?.message ?? err) }, 500);
     }
   }
