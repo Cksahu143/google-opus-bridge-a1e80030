@@ -124,8 +124,7 @@ async function getSessionConnectUrl(sessionId: string): Promise<string> {
 // Deno edge function). Opens connectUrl, attaches to the session's one
 // page target, and returns helpers scoped to that page's CDP session so
 // callers can send multiple commands (e.g. insertText then a keypress)
-// over one connection. The caller decides whether/when to close it -- see
-// navigateSession's comment on why an immediate close broke the Live View.
+// over one connection.
 async function attachToPage(connectUrl: string) {
   const ws = new WebSocket(connectUrl);
   await new Promise<void>((resolve, reject) => {
@@ -184,12 +183,15 @@ async function attachToPage(connectUrl: string) {
 // reading the debug URL, for exactly this reason.
 //
 // IMPORTANT: deliberately does not ws.close() when done. Closing it
-// immediately caused the Live View iframe to show "WebSocket disconnected"
-// -- every official Browserbase example keeps this connection open for the
-// life of the session rather than attaching-and-detaching, so a deliberate
-// detach right after navigating appears to tear down state the Live View's
-// own connection depends on. Left to close naturally when this function's
-// Deno isolate is later recycled.
+// immediately (during /start, while the Live View is still initializing)
+// caused the Live View iframe to show "WebSocket disconnected" -- every
+// official Browserbase example keeps this connection open for the life of
+// the session rather than attaching-and-detaching, so a deliberate detach
+// right after navigating appears to tear down state the Live View's own
+// connection depends on during that initial handshake window. Left to
+// close naturally when this function's Deno isolate is later recycled.
+// (Compare typeIntoSession below, which DOES close -- see its comment for
+// why that's a different situation.)
 async function navigateSession(connectUrl: string, targetUrl: string): Promise<void> {
   const page = await attachToPage(connectUrl);
   await page.command("Page.navigate", { url: targetUrl });
@@ -204,21 +206,40 @@ async function navigateSession(connectUrl: string, targetUrl: string): Promise<v
 // field once in the Live View to focus it -- taps/clicks are forwarded
 // fine by Browserbase's own Live View, it's only the OS keyboard that
 // doesn't appear.
+//
+// UNLIKE navigateSession, this DOES close its connection when done (after
+// a short buffer for the commands to be processed). A multi-step login
+// calls this endpoint repeatedly -- email, then password, then Enter --
+// and each call was opening a brand new CDP connection to the same
+// session and never closing any of them. By the time the user was a few
+// fields into the login, several simultaneous connections had piled up
+// against one session, which is what was producing "WebSocket
+// disconnected" mid-login: almost certainly a concurrent-connection limit
+// on the session getting exceeded, evicting whichever connection the Live
+// View itself depends on. /start's navigateSession only ever runs once
+// per session, so it doesn't have this accumulation problem.
 async function typeIntoSession(connectUrl: string, text: string, pressEnter: boolean): Promise<void> {
   const page = await attachToPage(connectUrl);
-  if (text) {
-    await page.command("Input.insertText", { text });
-  }
-  if (pressEnter) {
-    const enterParams = {
-      key: "Enter",
-      code: "Enter",
-      windowsVirtualKeyCode: 13,
-      nativeVirtualKeyCode: 13,
-      text: "\r",
-    };
-    await page.command("Input.dispatchKeyEvent", { type: "keyDown", ...enterParams });
-    await page.command("Input.dispatchKeyEvent", { type: "keyUp", ...enterParams });
+  try {
+    if (text) {
+      await page.command("Input.insertText", { text });
+    }
+    if (pressEnter) {
+      const enterParams = {
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        text: "\r",
+      };
+      await page.command("Input.dispatchKeyEvent", { type: "keyDown", ...enterParams });
+      await page.command("Input.dispatchKeyEvent", { type: "keyUp", ...enterParams });
+    }
+    // Small buffer before detaching so the commands are fully processed
+    // server-side first, rather than closing the instant the ack arrives.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  } finally {
+    page.ws.close();
   }
 }
 
