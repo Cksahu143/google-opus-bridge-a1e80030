@@ -2,35 +2,21 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 
-// UNTESTED — written for review. Requires BROWSERBASE_API_KEY and
-// BROWSERBASE_PROJECT_ID to be set as secrets on the browserbase-login
-// Supabase edge function before this page will actually work (free
-// account at browserbase.com, no card required).
-//
 // The actual browser doing the Google/NotebookLM login runs on
-// Browserbase's managed infrastructure, streamed into this page via an
-// iframe pointed at their Live View URL. This replaces an earlier
-// self-hosted Docker/Xvfb/noVNC container (login-service/ in the repo
-// root) that was never deployed, so the old version of this page could
-// not actually complete a login. No self-hosting is required now.
+// Browserbase's managed infrastructure. Opened as a real new browser tab
+// (window.open) rather than an embedded iframe -- this is both faster
+// (no streaming-into-an-iframe overhead) and means the user types
+// directly into a normal page, so no CDP text-forwarding workaround is
+// needed for iPad/iPhone (that was only ever required because iOS Safari
+// won't raise a keyboard for an element inside a remote/screencast
+// iframe -- a real tab doesn't have that problem at all).
 //
 // KNOWN LIMITATION: only one login session can be in progress at a time
 // per user (Browserbase's free tier also caps sessions at 15 minutes and
-// ~1 browser-hour/month total — fine for occasional logins, not for
+// ~1 browser-hour/month total -- fine for occasional logins, not for
 // anything continuous).
-//
-// iPad/iPhone typing: iOS/iPadOS Safari will not raise its virtual
-// keyboard for an element inside the live-view iframe -- there's no local
-// DOM input for it to attach to, since the actual login form lives inside
-// Browserbase's remote browser, not on the device. The "Type into
-// browser" box below is a real local input (so iOS *will* show a
-// keyboard for it); typing there and tapping Send forwards the text into
-// whatever field is currently focused in the live view via the backend's
-// CDP bridge. Tap the field in the live view first to focus it, same as
-// any login form.
 
 export const Route = createFileRoute("/notebooks/connect")({
   ssr: false,
@@ -48,9 +34,8 @@ export const Route = createFileRoute("/notebooks/connect")({
 });
 
 // Base URL for this project's Supabase Edge Functions. All of /start,
-// /type, /complete, /disconnect and /status go through browserbase-login,
-// authenticated with the signed-in user's own JWT (see authHeader()) —
-// there is no longer a separate, unauthenticated login-service to call.
+// /complete, /disconnect and /status go through browserbase-login,
+// authenticated with the signed-in user's own JWT (see authHeader()).
 // Derived from the project's Supabase URL so there is no extra env var to
 // forget (VITE_SUPABASE_FUNCTIONS_URL still wins if it's set explicitly).
 const SUPABASE_FUNCTIONS_URL =
@@ -61,7 +46,7 @@ type ConnectState =
   | { step: "checking" }
   | { step: "idle" }
   | { step: "starting" }
-  | { step: "awaiting-login"; sessionId: string; liveViewUrl: string }
+  | { step: "awaiting-login"; sessionId: string; liveViewUrl: string; opened: boolean }
   | { step: "completing"; sessionId: string }
   | { step: "connected"; connectedAt: string | null }
   | { step: "disconnecting" }
@@ -72,13 +57,8 @@ function ConnectNotebookLmPage() {
   const [userId, setUserId] = useState<string | null>(null);
   // Track the in-flight sessionId only so an unmount mid-login doesn't
   // leave a dangling reference client-side. Browserbase sessions expire on
-  // their own (15 min on the free tier) — there's no cancel call to make.
+  // their own (15 min on the free tier) -- there's no cancel call to make.
   const sessionIdRef = useRef<string | null>(null);
-
-  // Local "type into browser" box state -- see the file header comment on
-  // why this exists (iOS won't show a keyboard for the remote page).
-  const [typeValue, setTypeValue] = useState("");
-  const [typing, setTyping] = useState(false);
 
   async function authHeader(): Promise<Record<string, string>> {
     const { data } = await supabase.auth.getSession();
@@ -98,7 +78,7 @@ function ConnectNotebookLmPage() {
           : { step: "idle" },
       );
     } catch (err) {
-      // Not fatal — just fall back to showing the connect button rather
+      // Not fatal -- just fall back to showing the connect button rather
       // than blocking the page on a status-check failure.
       setState({ step: "idle" });
       console.error("Failed to check NotebookLM connection status:", err);
@@ -110,13 +90,15 @@ function ConnectNotebookLmPage() {
       setUserId(data.user?.id ?? null);
       void checkStatus();
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Explicit lock, separate from React state: the logs showed two /start
-  // calls firing 0.7s apart from a single interaction, each burning one of
-  // only 3 free-tier concurrent session slots. A ref updates synchronously,
-  // unlike setState, so this actually blocks the second call rather than
-  // hoping the button disables in time.
+  // Explicit lock, separate from React state: a synchronous ref actually
+  // blocks a rapid double-tap before React re-renders the button as
+  // disabled, unlike setState -- confirmed necessary via Supabase logs
+  // earlier showing two /start calls fire under 1 second apart from a
+  // single interaction, each burning one of only 3 free-tier concurrent
+  // session slots.
   const startInFlightRef = useRef(false);
 
   async function startConnect() {
@@ -137,10 +119,6 @@ function ConnectNotebookLmPage() {
       if (!res.ok) throw new Error(await res.text());
       const { sessionId, liveViewUrl } = await res.json();
       if (!liveViewUrl || typeof liveViewUrl !== "string") {
-        // This is the actual "about:blank" bug: previously we'd set
-        // liveViewUrl into state even if it came back empty/undefined,
-        // and <iframe src={undefined}> silently renders about:blank with
-        // no visible error at all. Fail loudly instead.
         throw new Error(
           "Browserbase did not return a live view URL. Check that BROWSERBASE_API_KEY and " +
             "BROWSERBASE_PROJECT_ID are set as secrets on the browserbase-login Edge Function " +
@@ -149,49 +127,17 @@ function ConnectNotebookLmPage() {
         );
       }
       sessionIdRef.current = sessionId;
-      setState({ step: "awaiting-login", sessionId, liveViewUrl });
+      // Open immediately, inside the same user gesture (tapping "Connect")
+      // that triggered startConnect -- iOS Safari blocks window.open calls
+      // that happen after an await unless they're still within the
+      // original tap's event, so this fires right as the response lands
+      // rather than after further async work.
+      const opened = window.open(liveViewUrl, "_blank", "noopener,noreferrer");
+      setState({ step: "awaiting-login", sessionId, liveViewUrl, opened: Boolean(opened) });
     } catch (err) {
       setState({ step: "error", message: String((err as Error)?.message ?? err) });
     } finally {
       startInFlightRef.current = false;
-    }
-  }
-
-  // Forwards the local text box's value into the remote page's currently
-  // focused field, and optionally presses Enter. See the file header
-  // comment for why this exists (iOS won't raise a keyboard inside the
-  // live-view iframe). Clears the box afterward so it's ready for the
-  // next field (e.g. password, after email).
-  // Same class of bug as startInFlightRef above, same fix: React's `typing`
-  // state alone doesn't block a fast double-tap on "Send" (setState is
-  // async/batched — two touch events can both fire before the button
-  // re-renders as disabled). On this endpoint specifically, that means two
-  // simultaneous attachToPage() WebSocket connections opening against the
-  // same session — which is precisely what the /type handler's own file
-  // comment already identifies as the cause of "WebSocket disconnected"
-  // mid-login. A synchronous ref actually blocks the second call.
-  const typingInFlightRef = useRef(false);
-
-  async function sendTypedText(pressEnter: boolean) {
-    if (state.step !== "awaiting-login") return;
-    if (!typeValue && !pressEnter) return;
-    if (typingInFlightRef.current) return;
-    typingInFlightRef.current = true;
-    setTyping(true);
-    try {
-      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/type`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ sessionId: state.sessionId, text: typeValue, pressEnter }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setTypeValue("");
-    } catch (err) {
-      setState({ step: "error", message: String((err as Error)?.message ?? err) });
-    } finally {
-      setTyping(false);
-      typingInFlightRef.current = false;
     }
   }
 
@@ -238,7 +184,7 @@ function ConnectNotebookLmPage() {
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
           This connects your real NotebookLM account (not the separate Nexus-managed notebooks used
-          elsewhere in this app). You&apos;ll log into Google in the embedded window below.
+          elsewhere in this app). You&apos;ll log into Google in a new tab.
         </p>
       </div>
 
@@ -258,68 +204,22 @@ function ConnectNotebookLmPage() {
 
       {state.step === "awaiting-login" && (
         <div className="space-y-4">
-          <div
-            className="overflow-hidden rounded-lg border border-border"
-            style={{ aspectRatio: "16 / 10" }}
-          >
-            {/* Real, live browser session running on Browserbase's
-                infrastructure — not a screenshot. Tap fields to focus them;
-                on iPad/iPhone, type into the box below instead of directly
-                in this iframe (see "Can't type?" note below it). */}
-            <iframe
-              src={state.liveViewUrl}
-              title="NotebookLM login"
-              className="h-full w-full"
-              allow="clipboard-write"
-              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
-            />
-          </div>
-
-          <div className="space-y-2 rounded-lg border border-border p-3">
-            <p className="text-xs font-medium text-muted-foreground">
-              Can&apos;t type in the window above? (Common on iPad/iPhone.) Tap the field you want
-              to fill in the login window first, then type it here instead:
-            </p>
-            <div className="flex gap-2">
-              <Input
-                type="text"
-                inputMode="email"
-                autoCapitalize="none"
-                autoCorrect="off"
-                placeholder="Type your email or password here…"
-                value={typeValue}
-                onChange={(e) => setTypeValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void sendTypedText(true);
-                  }
-                }}
-                disabled={typing}
-              />
+          {!state.opened && (
+            <div className="space-y-2 rounded-lg border border-border p-3">
+              <p className="text-sm text-foreground">
+                Your browser blocked the automatic pop-up. Tap the button below to open it manually:
+              </p>
               <Button
                 type="button"
-                variant="secondary"
-                onClick={() => void sendTypedText(false)}
-                disabled={typing || !typeValue}
+                onClick={() => window.open(state.liveViewUrl, "_blank", "noopener,noreferrer")}
               >
-                Send
+                Open login in a new tab
               </Button>
             </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void sendTypedText(true)}
-              disabled={typing}
-            >
-              Press Enter / Next
-            </Button>
-          </div>
-
+          )}
           <p className="text-sm text-muted-foreground">
-            Log into your Google account above. Once you see your NotebookLM notebooks load inside
-            the window, tap the button below.
+            Log into your Google account in that tab — type normally there, just like any website.
+            Once you see your NotebookLM notebooks load, come back to this tab and tap below.
           </p>
           <Button type="button" onClick={() => finishConnect(state.sessionId)}>
             I&apos;m done logging in

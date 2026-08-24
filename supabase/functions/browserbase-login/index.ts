@@ -125,7 +125,7 @@ async function getSessionConnectUrl(sessionId: string): Promise<string> {
 // page target, and returns helpers scoped to that page's CDP session so
 // callers can send multiple commands (e.g. insertText then a keypress)
 // over one connection.
-async function attachToPage(connectUrl: string) {
+async function attachToPage(connectUrl: string, knownTargetId?: string) {
   const ws = new WebSocket(connectUrl);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
@@ -158,19 +158,26 @@ async function attachToPage(connectUrl: string) {
     });
   }
 
-  const targetsRes = await waitFor(send("Target.getTargets"));
-  const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
-  const pageTarget = targetInfos.find((t) => t.type === "page");
-  if (!pageTarget) throw new Error("No page target found on the Browserbase session");
+  // Skips a full round-trip to re-discover the page target on every call
+  // when the caller already knows it (from /start's response) — the page
+  // doesn't change mid-session, so re-listing targets on every keystroke
+  // send was pure wasted latency, not a correctness requirement.
+  let targetId = knownTargetId;
+  if (!targetId) {
+    const targetsRes = await waitFor(send("Target.getTargets"));
+    const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
+    const pageTarget = targetInfos.find((t) => t.type === "page");
+    if (!pageTarget) throw new Error("No page target found on the Browserbase session");
+    targetId = pageTarget.targetId;
+  }
 
-  const attachRes = await waitFor(
-    send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
-  );
+  const attachRes = await waitFor(send("Target.attachToTarget", { targetId, flatten: true }));
   const pageSessionId = attachRes.result?.["sessionId"] as string | undefined;
   if (!pageSessionId) throw new Error("Failed to attach to the Browserbase session's page target");
 
   return {
     ws,
+    targetId,
     command: (method: string, params: Record<string, unknown> = {}) =>
       waitFor(send(method, params, pageSessionId)),
   };
@@ -192,9 +199,10 @@ async function attachToPage(connectUrl: string) {
 // close naturally when this function's Deno isolate is later recycled.
 // (Compare typeIntoSession below, which DOES close -- see its comment for
 // why that's a different situation.)
-async function navigateSession(connectUrl: string, targetUrl: string): Promise<void> {
+async function navigateSession(connectUrl: string, targetUrl: string): Promise<string> {
   const page = await attachToPage(connectUrl);
   await page.command("Page.navigate", { url: targetUrl });
+  return page.targetId;
 }
 
 // Types text into whatever element is currently focused in the remote
@@ -218,8 +226,13 @@ async function navigateSession(connectUrl: string, targetUrl: string): Promise<v
 // on the session getting exceeded, evicting whichever connection the Live
 // View itself depends on. /start's navigateSession only ever runs once
 // per session, so it doesn't have this accumulation problem.
-async function typeIntoSession(connectUrl: string, text: string, pressEnter: boolean): Promise<void> {
-  const page = await attachToPage(connectUrl);
+async function typeIntoSession(
+  connectUrl: string,
+  text: string,
+  pressEnter: boolean,
+  knownTargetId?: string,
+): Promise<void> {
+  const page = await attachToPage(connectUrl, knownTargetId);
   try {
     if (text) {
       await page.command("Input.insertText", { text });
