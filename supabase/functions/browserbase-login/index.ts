@@ -79,8 +79,7 @@ function bbHeaders(): Record<string, string> {
 // free-tier timeout. Confirmed against Browserbase's own docs: POST
 // /v1/sessions/{id} with status: "REQUEST_RELEASE". Without this, every
 // single login attempt permanently consumes one of the free tier's 3
-// concurrent-session slots until it naturally expires — which is exactly
-// what filled all 3 slots during testing tonight.
+// concurrent-session slots until it naturally expires.
 async function closeSession(sessionId: string): Promise<void> {
   try {
     const res = await fetch(`${BROWSERBASE_API}/sessions/${sessionId}`, {
@@ -104,6 +103,15 @@ async function closeSession(sessionId: string): Promise<void> {
 // does the equivalent over raw CDP (no Playwright dependency available in
 // a Deno edge function): attach to the session's one open page target and
 // send Page.navigate.
+//
+// IMPORTANT: this WebSocket is deliberately left open (not ws.close()'d)
+// after navigating. Closing it immediately caused the Live View iframe to
+// show "WebSocket disconnected" -- every official Browserbase example
+// (Playwright's chromium.connectOverCDP, etc.) keeps this connection open
+// for the life of the session rather than attaching-and-detaching, so a
+// deliberate detach right after Page.navigate appears to tear down state
+// the Live View's own connection depends on. The socket is left to close
+// naturally when this function's Deno isolate is later recycled.
 async function navigateSession(connectUrl: string, targetUrl: string): Promise<void> {
   const ws = new WebSocket(connectUrl);
   await new Promise<void>((resolve, reject) => {
@@ -137,22 +145,19 @@ async function navigateSession(connectUrl: string, targetUrl: string): Promise<v
     });
   }
 
-  try {
-    const targetsRes = await waitFor(send("Target.getTargets"));
-    const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
-    const pageTarget = targetInfos.find((t) => t.type === "page");
-    if (!pageTarget) throw new Error("No page target found on the new Browserbase session");
+  const targetsRes = await waitFor(send("Target.getTargets"));
+  const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
+  const pageTarget = targetInfos.find((t) => t.type === "page");
+  if (!pageTarget) throw new Error("No page target found on the new Browserbase session");
 
-    const attachRes = await waitFor(
-      send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
-    );
-    const sessionId = attachRes.result?.["sessionId"] as string | undefined;
-    if (!sessionId) throw new Error("Failed to attach to the Browserbase session's page target");
+  const attachRes = await waitFor(
+    send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
+  );
+  const sessionId = attachRes.result?.["sessionId"] as string | undefined;
+  if (!sessionId) throw new Error("Failed to attach to the Browserbase session's page target");
 
-    await waitFor(send("Page.navigate", { url: targetUrl }, sessionId));
-  } finally {
-    ws.close();
-  }
+  await waitFor(send("Page.navigate", { url: targetUrl }, sessionId));
+  // Deliberately no ws.close() here -- see the comment above the function.
 }
 
 async function requireUser(req: Request) {
