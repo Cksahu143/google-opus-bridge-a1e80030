@@ -162,9 +162,21 @@ function ConnectNotebookLmPage() {
   // comment for why this exists (iOS won't raise a keyboard inside the
   // live-view iframe). Clears the box afterward so it's ready for the
   // next field (e.g. password, after email).
+  // Same class of bug as startInFlightRef above, same fix: React's `typing`
+  // state alone doesn't block a fast double-tap on "Send" (setState is
+  // async/batched — two touch events can both fire before the button
+  // re-renders as disabled). On this endpoint specifically, that means two
+  // simultaneous attachToPage() WebSocket connections opening against the
+  // same session — which is precisely what the /type handler's own file
+  // comment already identifies as the cause of "WebSocket disconnected"
+  // mid-login. A synchronous ref actually blocks the second call.
+  const typingInFlightRef = useRef(false);
+
   async function sendTypedText(pressEnter: boolean) {
     if (state.step !== "awaiting-login") return;
     if (!typeValue && !pressEnter) return;
+    if (typingInFlightRef.current) return;
+    typingInFlightRef.current = true;
     setTyping(true);
     try {
       const headers = { "Content-Type": "application/json", ...(await authHeader()) };
@@ -179,6 +191,7 @@ function ConnectNotebookLmPage() {
       setState({ step: "error", message: String((err as Error)?.message ?? err) });
     } finally {
       setTyping(false);
+      typingInFlightRef.current = false;
     }
   }
 
@@ -264,8 +277,8 @@ function ConnectNotebookLmPage() {
 
           <div className="space-y-2 rounded-lg border border-border p-3">
             <p className="text-xs font-medium text-muted-foreground">
-              Can&apos;t type in the window above? (Common on iPad/iPhone.) Tap the field you want to
-              fill in the login window first, then type it here instead:
+              Can&apos;t type in the window above? (Common on iPad/iPhone.) Tap the field you want
+              to fill in the login window first, then type it here instead:
             </p>
             <div className="flex gap-2">
               <Input
@@ -284,7 +297,12 @@ function ConnectNotebookLmPage() {
                 }}
                 disabled={typing}
               />
-              <Button type="button" variant="secondary" onClick={() => void sendTypedText(false)} disabled={typing || !typeValue}>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => void sendTypedText(false)}
+                disabled={typing || !typeValue}
+              >
                 Send
               </Button>
             </div>
