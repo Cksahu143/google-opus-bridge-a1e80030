@@ -1,9 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
+import { runNexusCapability } from "@/lib/nexus/nexus.functions";
 
 // The actual browser doing the Google/NotebookLM login runs on
 // Browserbase's managed infrastructure, embedded here via an <iframe>
@@ -76,6 +78,33 @@ type ConnectState =
 function ConnectNotebookLmPage() {
   const [state, setState] = useState<ConnectState>({ step: "checking" });
   const [userId, setUserId] = useState<string | null>(null);
+  const callCapability = useServerFn(runNexusCapability);
+
+  // Actually exercises the notebooklm_browserbase adapter registered on
+  // top of this login, instead of just claiming "Claude can use this now"
+  // with no way to verify it from the page itself.
+  const [toolState, setToolState] = useState<
+    | { kind: "idle" }
+    | { kind: "running"; tool: "health" | "list" }
+    | { kind: "result"; tool: "health" | "list"; data: unknown }
+    | { kind: "tool-error"; tool: "health" | "list"; message: string }
+  >({ kind: "idle" });
+
+  async function runTool(tool: "health" | "list") {
+    setToolState({ kind: "running", tool });
+    const capabilityId =
+      tool === "health"
+        ? "notebooklm_browserbase.get_health"
+        : "notebooklm_browserbase.list_notebooks";
+    try {
+      const result = await callCapability({ data: { capabilityId, input: {} } });
+      if (!result.ok) throw new Error(result.error ?? "Request failed");
+      setToolState({ kind: "result", tool, data: JSON.parse(result.resultJson as string) });
+    } catch (err) {
+      setToolState({ kind: "tool-error", tool, message: String((err as Error)?.message ?? err) });
+    }
+  }
+
   // Track the in-flight sessionId only so an unmount mid-login doesn't
   // leave a dangling reference client-side. Browserbase sessions expire on
   // their own (15 min on the free tier) -- there's no cancel call to make.
@@ -336,12 +365,52 @@ function ConnectNotebookLmPage() {
       )}
 
       {state.step === "connected" && (
-        <div className="space-y-3">
+        <div className="space-y-4">
           <p className="text-sm text-foreground">
             NotebookLM connected
             {state.connectedAt ? ` — since ${new Date(state.connectedAt).toLocaleString()}` : ""}.
-            Claude can now create and manage your real notebooks.
           </p>
+
+          <div className="space-y-2 rounded-lg border border-border p-3">
+            <p className="text-xs font-medium text-muted-foreground">
+              Try the actual tools Claude uses against this login:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => void runTool("health")}
+                disabled={toolState.kind === "running"}
+              >
+                {toolState.kind === "running" && toolState.tool === "health"
+                  ? "Checking…"
+                  : "Check login is still valid"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() => void runTool("list")}
+                disabled={toolState.kind === "running"}
+              >
+                {toolState.kind === "running" && toolState.tool === "list"
+                  ? "Loading…"
+                  : "List my real notebooks"}
+              </Button>
+            </div>
+
+            {toolState.kind === "result" && (
+              <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted p-2 text-xs">
+                {JSON.stringify(toolState.data, null, 2)}
+              </pre>
+            )}
+            {toolState.kind === "tool-error" && (
+              <p role="alert" className="text-xs text-destructive">
+                {toolState.message}
+              </p>
+            )}
+          </div>
+
           <Button type="button" variant="outline" onClick={disconnect}>
             Disconnect NotebookLM
           </Button>
