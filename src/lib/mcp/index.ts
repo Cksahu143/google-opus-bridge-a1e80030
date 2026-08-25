@@ -23,7 +23,7 @@ export default defineMcp({
   title: "Google Nexus Gateway",
   version: "1.2.0",
   instructions:
-    "Google Nexus is one connection to the Google ecosystem and configured Google Cloud services. Start with list_capabilities or search_capabilities, then run operations with call_capability or batch_call_capabilities. Use connection_status when a call reports a missing connection or permission.",
+    "Google Nexus is one connection to the whole Google ecosystem and configured Google Cloud services for the signed-in user. Start with search_capabilities when you know the task but not the exact capability id, or list_capabilities for the complete catalog. Use call_capability for one operation and batch_call_capabilities for a short ordered workflow. Use connection_status when a call reports a missing connection or permission. Mutating calls are executed only through the authenticated user's Nexus connection.",
   auth: auth.oauth.issuer({
     issuer: `https://${projectRef}.supabase.co/auth/v1`,
     acceptedAudiences: "authenticated",

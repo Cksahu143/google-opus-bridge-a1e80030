@@ -1,33 +1,48 @@
 import { defineTool } from "@lovable.dev/mcp-js";
 import { z } from "zod";
+
 import { textResult } from "../nexus";
+import { capabilityCatalog } from "@/lib/nexus/registry";
 
 export default defineTool({
   name: "search_capabilities",
   title: "Search Google capabilities",
-  description: "Search the Nexus capability catalog by service, title, description, or capability id so an agent can discover the correct operation without guessing ids.",
+  description:
+    "Find Google Nexus capabilities by service, name, description, or implementation. Use this before call_capability when you know what you want to do but not the exact capability id.",
   inputSchema: {
-    query: z.string().min(1).describe("Search terms such as 'calendar', 'notebook audio', 'speech', or 'Drive move'."),
-    service: z.string().optional().describe("Optional exact service filter."),
-    mutating: z.boolean().optional().describe("Optional filter for read-only vs mutating operations."),
-    limit: z.number().int().min(1).max(50).default(20),
+    query: z.string().trim().optional().describe("Text to match against capability id, service, title, or description."),
+    service: z.string().trim().optional().describe("Optional service filter such as drive, gmail, calendar, tasks, or github."),
+    mutating: z.boolean().optional().describe("If set, return only read-only or mutating capabilities."),
+    limit: z.number().int().min(1).max(50).default(20).describe("Maximum number of matches."),
   },
-  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: true, openWorldHint: false },
   handler: async ({ query, service, mutating, limit }) => {
-    const { capabilityCatalog } = await import("@/lib/nexus/registry");
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const needle = query?.toLowerCase();
+    const serviceNeedle = service?.toLowerCase();
+
     const matches = capabilityCatalog()
-      .filter((item) => !service || item.service === service)
+      .filter((item) => !serviceNeedle || item.service.toLowerCase() === serviceNeedle)
       .filter((item) => mutating === undefined || item.mutating === mutating)
-      .map((item) => {
-        const haystack = `${item.id} ${item.service} ${item.serviceLabel} ${item.title} ${item.description}`.toLowerCase();
-        const score = terms.reduce((sum, term) => sum + (haystack.includes(term) ? (item.id.includes(term) ? 3 : 1) : 0), 0);
-        return { item, score };
+      .filter((item) => {
+        if (!needle) return true;
+        const haystack = [item.id, item.service, item.serviceLabel, item.title, item.description, item.implementation]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(needle);
       })
-      .filter(({ score }) => score > 0)
-      .sort((a, b) => b.score - a.score || a.item.id.localeCompare(b.item.id))
       .slice(0, limit)
-      .map(({ item }) => item);
-    return textResult({ query, matches });
+      .map(({ id, service: capabilityService, serviceLabel, title, description, implementation, mutating: isMutating, serviceStatus, inputSchema }) => ({
+        id,
+        service: capabilityService,
+        serviceLabel,
+        title,
+        description,
+        implementation,
+        mutating: isMutating,
+        serviceStatus,
+        inputSchema,
+      }));
+
+    return textResult({ count: matches.length, matches });
   },
 });
