@@ -19,11 +19,7 @@ export default defineTool({
   description:
     "Run several Google Nexus capabilities sequentially in one MCP round trip. Use this when an agent needs a small workflow such as Drive search followed by Docs read or Tasks creation. Calls execute in order and each result is returned separately.",
   inputSchema: {
-    calls: z
-      .array(requestSchema)
-      .min(1)
-      .max(20)
-      .describe("Ordered capability calls to execute."),
+    calls: z.array(requestSchema).min(1).max(20).describe("Ordered capability calls to execute."),
   },
   annotations: { readOnlyHint: false, openWorldHint: true },
   handler: async ({ calls }, ctx) => {
@@ -38,8 +34,7 @@ export default defineTool({
       error?: string;
     }> = [];
 
-    for (let index = 0; index < calls.length; index += 1) {
-      const call = calls[index];
+    for (const [index, call] of calls.entries()) {
       try {
         const result = await runCapability({
           userId,

@@ -2,16 +2,24 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 
 // The actual browser doing the Google/NotebookLM login runs on
-// Browserbase's managed infrastructure. Opened as a real new browser tab
-// (window.open) rather than an embedded iframe -- this is both faster
-// (no streaming-into-an-iframe overhead) and means the user types
-// directly into a normal page, so no CDP text-forwarding workaround is
-// needed for iPad/iPhone (that was only ever required because iOS Safari
-// won't raise a keyboard for an element inside a remote/screencast
-// iframe -- a real tab doesn't have that problem at all).
+// Browserbase's managed infrastructure. Its Live View is opened as a real
+// new browser tab (window.open) rather than embedded in an iframe here —
+// gives a full-size, less cramped view than a small embedded frame.
+//
+// IMPORTANT: the Live View, whether shown in an iframe or a full tab, is
+// still a screencast/canvas stream of a remote browser, not the actual
+// page's real DOM loaded locally — there is no local input element for
+// iOS/iPadOS Safari to attach a keyboard to either way. This is why the
+// "type into browser" box below still exists even with the new-tab
+// change: typing there and tapping Send forwards the text into whatever
+// field is currently focused in the live view via the backend's CDP
+// bridge (Input.insertText), the same mechanism Chrome uses for
+// IME/emoji-keyboard input. Tap the field in the new tab first to focus
+// it, same as any login form, then come back to this tab to type.
 //
 // KNOWN LIMITATION: only one login session can be in progress at a time
 // per user (Browserbase's free tier also caps sessions at 15 minutes and
@@ -141,6 +149,41 @@ function ConnectNotebookLmPage() {
     }
   }
 
+  // Local "type into browser" box state -- still needed with the live view
+  // in its own tab, since it's a screencast, not a real local page (see
+  // file header comment).
+  const [typeValue, setTypeValue] = useState("");
+  const [typing, setTyping] = useState(false);
+  // Synchronous ref lock, not just the `typing` state: a fast double-tap
+  // on "Send" can fire twice before React re-renders the button as
+  // disabled (setState is async/batched). Two concurrent /type calls means
+  // two simultaneous CDP WebSocket connections to the same session, which
+  // is exactly what causes "WebSocket disconnected" mid-login.
+  const typingInFlightRef = useRef(false);
+
+  async function sendTypedText(pressEnter: boolean) {
+    if (state.step !== "awaiting-login") return;
+    if (!typeValue && !pressEnter) return;
+    if (typingInFlightRef.current) return;
+    typingInFlightRef.current = true;
+    setTyping(true);
+    try {
+      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/type`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sessionId: state.sessionId, text: typeValue, pressEnter }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setTypeValue("");
+    } catch (err) {
+      setState({ step: "error", message: String((err as Error)?.message ?? err) });
+    } finally {
+      setTyping(false);
+      typingInFlightRef.current = false;
+    }
+  }
+
   async function finishConnect(sessionId: string) {
     setState({ step: "completing", sessionId });
     try {
@@ -217,9 +260,52 @@ function ConnectNotebookLmPage() {
               </Button>
             </div>
           )}
+
+          <div className="space-y-2 rounded-lg border border-border p-3">
+            <p className="text-xs font-medium text-muted-foreground">
+              Can&apos;t type in the new tab? (Common on iPad/iPhone — the live view is a screencast,
+              not a real page, so iOS won&apos;t show a keyboard for it.) Tap the field you want to
+              fill in that tab first to focus it, then type it here instead:
+            </p>
+            <div className="flex gap-2">
+              <Input
+                type="text"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                placeholder="Type your email or password here…"
+                value={typeValue}
+                onChange={(e) => setTypeValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void sendTypedText(true);
+                  }
+                }}
+                disabled={typing}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => void sendTypedText(false)}
+                disabled={typing || !typeValue}
+              >
+                Send
+              </Button>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => void sendTypedText(true)}
+              disabled={typing}
+            >
+              Press Enter / Next
+            </Button>
+          </div>
+
           <p className="text-sm text-muted-foreground">
-            Log into your Google account in that tab — type normally there, just like any website.
-            Once you see your NotebookLM notebooks load, come back to this tab and tap below.
+            Once you see your NotebookLM notebooks load in that tab, come back here and tap below.
           </p>
           <Button type="button" onClick={() => finishConnect(state.sessionId)}>
             I&apos;m done logging in

@@ -10,9 +10,20 @@ export default defineTool({
   description:
     "Find Google Nexus capabilities by service, name, description, or implementation. Use this before call_capability when you know what you want to do but not the exact capability id.",
   inputSchema: {
-    query: z.string().trim().optional().describe("Text to match against capability id, service, title, or description."),
-    service: z.string().trim().optional().describe("Optional service filter such as drive, gmail, calendar, tasks, or github."),
-    mutating: z.boolean().optional().describe("If set, return only read-only or mutating capabilities."),
+    query: z
+      .string()
+      .trim()
+      .optional()
+      .describe("Text to match against capability id, service, title, or description."),
+    service: z
+      .string()
+      .trim()
+      .optional()
+      .describe("Optional service filter such as drive, gmail, calendar, tasks, or github."),
+    mutating: z
+      .boolean()
+      .optional()
+      .describe("If set, return only read-only or mutating capabilities."),
     limit: z.number().int().min(1).max(50).default(20).describe("Maximum number of matches."),
   },
   annotations: { readOnlyHint: true, openWorldHint: false },
@@ -25,23 +36,42 @@ export default defineTool({
       .filter((item) => mutating === undefined || item.mutating === mutating)
       .filter((item) => {
         if (!needle) return true;
-        const haystack = [item.id, item.service, item.serviceLabel, item.title, item.description, item.implementation]
+        const haystack = [
+          item.id,
+          item.service,
+          item.serviceLabel,
+          item.title,
+          item.description,
+          item.implementation,
+        ]
           .join(" ")
           .toLowerCase();
         return haystack.includes(needle);
       })
       .slice(0, limit)
-      .map(({ id, service: capabilityService, serviceLabel, title, description, implementation, mutating: isMutating, serviceStatus, inputSchema }) => ({
-        id,
-        service: capabilityService,
-        serviceLabel,
-        title,
-        description,
-        implementation,
-        mutating: isMutating,
-        serviceStatus,
-        inputSchema,
-      }));
+      .map(
+        ({
+          id,
+          service: capabilityService,
+          serviceLabel,
+          title,
+          description,
+          implementation,
+          mutating: isMutating,
+          serviceStatus,
+          inputSchema,
+        }) => ({
+          id,
+          service: capabilityService,
+          serviceLabel,
+          title,
+          description,
+          implementation,
+          mutating: isMutating,
+          serviceStatus,
+          inputSchema,
+        }),
+      );
 
     return textResult({ count: matches.length, matches });
   },
