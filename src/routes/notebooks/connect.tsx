@@ -6,20 +6,33 @@ import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 
 // The actual browser doing the Google/NotebookLM login runs on
-// Browserbase's managed infrastructure. Its Live View is opened as a real
-// new browser tab (window.open) rather than embedded in an iframe here —
-// gives a full-size, less cramped view than a small embedded frame.
+// Browserbase's managed infrastructure, embedded here via an <iframe>
+// pointed at their Live View URL -- this is Browserbase's own documented
+// pattern ("add the live view link to an iframe in your frontend to
+// embed it"), not a new-tab popup.
 //
-// IMPORTANT: the Live View, whether shown in an iframe or a full tab, is
+// A previous version of this page briefly switched to window.open() in a
+// new tab instead, reasoning it'd be less cramped. That introduced a
+// worse bug: opening a new tab backgrounds this original tab, and
+// iOS/iPadOS Safari is known to let a *backgrounded* tab's input show a
+// blinking caret (DOM focus succeeds) while withholding the actual
+// on-screen keyboard, since iOS only raises the keyboard for the
+// frontmost webview. That matched exactly what got reported: cursor
+// appears, keyboard never does, only on this page, only after the popup
+// opened -- and only fixable by staying in one tab. Reverted to the
+// iframe embed, which keeps this page and the login both in the same
+// frontmost context.
+//
+// IMPORTANT: whether embedded via iframe or a new tab, the Live View is
 // still a screencast/canvas stream of a remote browser, not the actual
-// page's real DOM loaded locally — there is no local input element for
-// iOS/iPadOS Safari to attach a keyboard to either way. This is why the
-// "type into browser" box below still exists even with the new-tab
-// change: typing there and tapping Send forwards the text into whatever
-// field is currently focused in the live view via the backend's CDP
-// bridge (Input.insertText), the same mechanism Chrome uses for
-// IME/emoji-keyboard input. Tap the field in the new tab first to focus
-// it, same as any login form, then come back to this tab to type.
+// page's real DOM loaded locally -- there is no local input element for
+// iOS/iPadOS Safari to attach a keyboard to *inside* it either way. This
+// is why the "type into browser" box below still exists: typing there
+// and tapping Send forwards the text into whatever field is currently
+// focused in the live view via the backend's CDP bridge
+// (Input.insertText), the same mechanism Chrome uses for IME/emoji
+// keyboard input. Tap the field inside the embedded window first to
+// focus it, same as any login form, then type in the box below it.
 //
 // KNOWN LIMITATION: only one login session can be in progress at a time
 // per user (Browserbase's free tier also caps sessions at 15 minutes and
@@ -42,7 +55,7 @@ export const Route = createFileRoute("/notebooks/connect")({
 });
 
 // Base URL for this project's Supabase Edge Functions. All of /start,
-// /complete, /disconnect and /status go through browserbase-login,
+// /type, /complete, /disconnect and /status go through browserbase-login,
 // authenticated with the signed-in user's own JWT (see authHeader()).
 // Derived from the project's Supabase URL so there is no extra env var to
 // forget (VITE_SUPABASE_FUNCTIONS_URL still wins if it's set explicitly).
@@ -54,7 +67,7 @@ type ConnectState =
   | { step: "checking" }
   | { step: "idle" }
   | { step: "starting" }
-  | { step: "awaiting-login"; sessionId: string; liveViewUrl: string; opened: boolean }
+  | { step: "awaiting-login"; sessionId: string; liveViewUrl: string }
   | { step: "completing"; sessionId: string }
   | { step: "connected"; connectedAt: string | null }
   | { step: "disconnecting" }
@@ -127,6 +140,10 @@ function ConnectNotebookLmPage() {
       if (!res.ok) throw new Error(await res.text());
       const { sessionId, liveViewUrl } = await res.json();
       if (!liveViewUrl || typeof liveViewUrl !== "string") {
+        // This is the actual "about:blank" bug from earlier: setting
+        // liveViewUrl into state even if it came back empty/undefined
+        // means <iframe src={undefined}> silently renders about:blank
+        // with no visible error at all. Fail loudly instead.
         throw new Error(
           "Browserbase did not return a live view URL. Check that BROWSERBASE_API_KEY and " +
             "BROWSERBASE_PROJECT_ID are set as secrets on the browserbase-login Edge Function " +
@@ -135,13 +152,7 @@ function ConnectNotebookLmPage() {
         );
       }
       sessionIdRef.current = sessionId;
-      // Open immediately, inside the same user gesture (tapping "Connect")
-      // that triggered startConnect -- iOS Safari blocks window.open calls
-      // that happen after an await unless they're still within the
-      // original tap's event, so this fires right as the response lands
-      // rather than after further async work.
-      const opened = window.open(liveViewUrl, "_blank", "noopener,noreferrer");
-      setState({ step: "awaiting-login", sessionId, liveViewUrl, opened: Boolean(opened) });
+      setState({ step: "awaiting-login", sessionId, liveViewUrl });
     } catch (err) {
       setState({ step: "error", message: String((err as Error)?.message ?? err) });
     } finally {
@@ -149,16 +160,17 @@ function ConnectNotebookLmPage() {
     }
   }
 
-  // Local "type into browser" box state -- still needed with the live view
-  // in its own tab, since it's a screencast, not a real local page (see
-  // file header comment).
+  // Local "type into browser" box state -- see the file header comment on
+  // why this exists (there's no local input inside the live view for iOS
+  // to attach a keyboard to).
   const [typeValue, setTypeValue] = useState("");
   const [typing, setTyping] = useState(false);
   // Synchronous ref lock, not just the `typing` state: a fast double-tap
   // on "Send" can fire twice before React re-renders the button as
   // disabled (setState is async/batched). Two concurrent /type calls means
   // two simultaneous CDP WebSocket connections to the same session, which
-  // is exactly what causes "WebSocket disconnected" mid-login.
+  // is exactly what caused "WebSocket disconnected" mid-login before the
+  // backend started closing each /type connection after use.
   const typingInFlightRef = useRef(false);
 
   async function sendTypedText(pressEnter: boolean) {
@@ -227,7 +239,7 @@ function ConnectNotebookLmPage() {
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
           This connects your real NotebookLM account (not the separate Nexus-managed notebooks used
-          elsewhere in this app). You&apos;ll log into Google in a new tab.
+          elsewhere in this app). You&apos;ll log into Google in the embedded window below.
         </p>
       </div>
 
@@ -247,25 +259,30 @@ function ConnectNotebookLmPage() {
 
       {state.step === "awaiting-login" && (
         <div className="space-y-4">
-          {!state.opened && (
-            <div className="space-y-2 rounded-lg border border-border p-3">
-              <p className="text-sm text-foreground">
-                Your browser blocked the automatic pop-up. Tap the button below to open it manually:
-              </p>
-              <Button
-                type="button"
-                onClick={() => window.open(state.liveViewUrl, "_blank", "noopener,noreferrer")}
-              >
-                Open login in a new tab
-              </Button>
-            </div>
-          )}
+          <div
+            className="overflow-hidden rounded-lg border border-border"
+            style={{ aspectRatio: "16 / 10" }}
+          >
+            {/* Real, live browser session running on Browserbase's
+                infrastructure -- not a screenshot. Tap fields to focus
+                them, then use the box below to actually type on iPad/iPhone
+                (see the note underneath). Deliberately NOT window.open()'d
+                into a new tab -- see file header comment for why that broke
+                the iOS keyboard entirely. */}
+            <iframe
+              src={state.liveViewUrl}
+              title="NotebookLM login"
+              className="h-full w-full"
+              allow="clipboard-write"
+              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+            />
+          </div>
 
           <div className="space-y-2 rounded-lg border border-border p-3">
             <p className="text-xs font-medium text-muted-foreground">
-              Can&apos;t type in the new tab? (Common on iPad/iPhone — the live view is a screencast,
-              not a real page, so iOS won&apos;t show a keyboard for it.) Tap the field you want to
-              fill in that tab first to focus it, then type it here instead:
+              Can&apos;t type in the window above? (Common on iPad/iPhone -- the live view is a
+              screencast, not a real page, so iOS won&apos;t show a keyboard for it.) Tap the field
+              you want to fill in the login window first to focus it, then type it here instead:
             </p>
             <div className="flex gap-2">
               <Input
@@ -305,7 +322,8 @@ function ConnectNotebookLmPage() {
           </div>
 
           <p className="text-sm text-muted-foreground">
-            Once you see your NotebookLM notebooks load in that tab, come back here and tap below.
+            Log into your Google account above. Once you see your NotebookLM notebooks load inside
+            the window, tap the button below.
           </p>
           <Button type="button" onClick={() => finishConnect(state.sessionId)}>
             I&apos;m done logging in
