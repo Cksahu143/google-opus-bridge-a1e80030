@@ -84,7 +84,10 @@ async function getStoredContextId(userId: string): Promise<string> {
 
 interface CdpPage {
   ws: WebSocket;
-  command: (method: string, params?: Record<string, unknown>) => Promise<{ result?: Record<string, unknown> }>;
+  command: (
+    method: string,
+    params?: Record<string, unknown>,
+  ) => Promise<{ result?: Record<string, unknown> }>;
   waitForEvent: (method: string, timeoutMs: number) => Promise<void>;
 }
 
@@ -243,7 +246,11 @@ async function evaluateJson<T>(page: CdpPage, expression: string): Promise<T> {
   });
   const result = res.result?.["result"] as { value?: unknown; subtype?: string } | undefined;
   if (result?.subtype === "error") {
-    throw new NexusError("notebooklm_browserbase_eval_failed", "Failed to read the NotebookLM page.", 502);
+    throw new NexusError(
+      "notebooklm_browserbase_eval_failed",
+      "Failed to read the NotebookLM page.",
+      502,
+    );
   }
   return (result?.value ?? null) as T;
 }

@@ -21,6 +21,7 @@ import meetAdapter from "@/integrations/google/meet/index";
 import musicAdapter from "@/integrations/google/music/index";
 import notebooklmAdapter from "@/integrations/google/notebooklm/index";
 import notebooklmNativeAdapter from "@/integrations/google/notebooklm-native/index";
+import notebooklmBrowserbaseAdapter from "@/integrations/google/notebooklm-browserbase/index";
 import notebookEnterpriseAdapter from "@/integrations/google/notebook-enterprise/index";
 import sheetsAdapter from "@/integrations/google/sheets/index";
 import slidesAdapter from "@/integrations/google/slides/index";
@@ -32,17 +33,97 @@ import cloudDataAdapter from "@/integrations/google/cloud-data/index";
 import type { Capability, GoogleAdapter } from "./types";
 
 export const ADAPTERS: GoogleAdapter[] = [
-  gmailAdapter, driveAdapter, driveActivityAdapter, docsAdapter, sheetsAdapter, slidesAdapter,
-  calendarAdapter, tasksAdapter, contactsAdapter, meetAdapter, chatAdapter, formsAdapter,
-  appsScriptAdapter, classroomAdapter, youtubeAdapter, keepAdapter, geminiAdapter, imagenAdapter,
-  veoAdapter, musicAdapter, flowAdapter, notebooklmAdapter, notebooklmNativeAdapter, notebookEnterpriseAdapter,
-  cloudAiAdapter, cloudDataAdapter, githubAdapter, browserAdapter, replicateAdapter, huggingfaceAdapter, daytonaAdapter,
+  gmailAdapter,
+  driveAdapter,
+  driveActivityAdapter,
+  docsAdapter,
+  sheetsAdapter,
+  slidesAdapter,
+  calendarAdapter,
+  tasksAdapter,
+  contactsAdapter,
+  meetAdapter,
+  chatAdapter,
+  formsAdapter,
+  appsScriptAdapter,
+  classroomAdapter,
+  youtubeAdapter,
+  keepAdapter,
+  geminiAdapter,
+  imagenAdapter,
+  veoAdapter,
+  musicAdapter,
+  flowAdapter,
+  notebooklmAdapter,
+  notebooklmNativeAdapter,
+  notebooklmBrowserbaseAdapter,
+  notebookEnterpriseAdapter,
+  cloudAiAdapter,
+  cloudDataAdapter,
+  githubAdapter,
+  browserAdapter,
+  replicateAdapter,
+  huggingfaceAdapter,
+  daytonaAdapter,
 ];
 
-export function findAdapter(service: string): GoogleAdapter | undefined { return ADAPTERS.find((adapter) => adapter.service === service); }
-export function allCapabilities(): { adapter: GoogleAdapter; capability: Capability<never, unknown> }[] { return ADAPTERS.flatMap((adapter) => adapter.capabilities.map((capability) => ({ adapter, capability }))); }
-export function findCapability(id: string) { return allCapabilities().find((entry) => entry.capability.id === id); }
-export function allRequiredScopes(): string[] { const set = new Set<string>(); for (const { capability } of allCapabilities()) for (const scope of capability.scopes) set.add(scope); return Array.from(set).sort(); }
-export interface CapabilitySummary { id: string; service: string; serviceLabel: string; title: string; description: string; implementation: string; mutating: boolean; scopes: string[]; serviceStatus: string; inputSchema: { type: string; fields?: string[] }; }
-export function capabilityCatalog(): CapabilitySummary[] { return allCapabilities().map(({ adapter, capability }) => ({ id: capability.id, service: adapter.service, serviceLabel: adapter.label, title: capability.title, description: capability.description, implementation: capability.implementation, mutating: Boolean(capability.mutating), scopes: capability.scopes, serviceStatus: adapter.status, inputSchema: describeSchema(capability) })); }
-function describeSchema(capability: Capability<never, unknown>): { type: string; fields?: string[] } { const shape = (capability.input as unknown as { _def?: { shape?: () => Record<string, unknown> } })._def?.shape; if (typeof shape !== "function") return { type: "object" }; try { return { type: "object", fields: Object.keys(shape()) }; } catch { return { type: "object" }; } }
+export function findAdapter(service: string): GoogleAdapter | undefined {
+  return ADAPTERS.find((adapter) => adapter.service === service);
+}
+export function allCapabilities(): {
+  adapter: GoogleAdapter;
+  capability: Capability<never, unknown>;
+}[] {
+  return ADAPTERS.flatMap((adapter) =>
+    adapter.capabilities.map((capability) => ({ adapter, capability })),
+  );
+}
+export function findCapability(id: string) {
+  return allCapabilities().find((entry) => entry.capability.id === id);
+}
+export function allRequiredScopes(): string[] {
+  const set = new Set<string>();
+  for (const { capability } of allCapabilities())
+    for (const scope of capability.scopes) set.add(scope);
+  return Array.from(set).sort();
+}
+export interface CapabilitySummary {
+  id: string;
+  service: string;
+  serviceLabel: string;
+  title: string;
+  description: string;
+  implementation: string;
+  mutating: boolean;
+  scopes: string[];
+  serviceStatus: string;
+  inputSchema: { type: string; fields?: string[] };
+}
+export function capabilityCatalog(): CapabilitySummary[] {
+  return allCapabilities().map(({ adapter, capability }) => ({
+    id: capability.id,
+    service: adapter.service,
+    serviceLabel: adapter.label,
+    title: capability.title,
+    description: capability.description,
+    implementation: capability.implementation,
+    mutating: Boolean(capability.mutating),
+    scopes: capability.scopes,
+    serviceStatus: adapter.status,
+    inputSchema: describeSchema(capability),
+  }));
+}
+function describeSchema(capability: Capability<never, unknown>): {
+  type: string;
+  fields?: string[];
+} {
+  const shape = (
+    capability.input as unknown as { _def?: { shape?: () => Record<string, unknown> } }
+  )._def?.shape;
+  if (typeof shape !== "function") return { type: "object" };
+  try {
+    return { type: "object", fields: Object.keys(shape()) };
+  } catch {
+    return { type: "object" };
+  }
+}

@@ -165,7 +165,8 @@ async function attachToPage(connectUrl: string, knownTargetId?: string) {
   let targetId = knownTargetId;
   if (!targetId) {
     const targetsRes = await waitFor(send("Target.getTargets"));
-    const targetInfos = (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
+    const targetInfos =
+      (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
     const pageTarget = targetInfos.find((t) => t.type === "page");
     if (!pageTarget) throw new Error("No page target found on the Browserbase session");
     targetId = pageTarget.targetId;
@@ -181,6 +182,59 @@ async function attachToPage(connectUrl: string, knownTargetId?: string) {
     command: (method: string, params: Record<string, unknown> = {}) =>
       waitFor(send(method, params, pageSessionId)),
   };
+}
+
+type AttachedPage = Awaited<ReturnType<typeof attachToPage>>;
+
+// Reuses one attached CDP connection per Browserbase session across
+// multiple /type calls, instead of attaching and detaching on every single
+// call. This exists because BOTH navigateSession (a single attach, never
+// closed) and the original typeIntoSession (attach+detach per call) were
+// independently observed to cause the Live View iframe to disconnect —
+// which points to the disruption coming from the *act* of a new
+// Target.attachToTarget on the target Live View is already watching, not
+// specifically from overlapping/concurrent connections. Minimizing how
+// many times that happens per session is the fix: attach once, reuse for
+// every keystroke-group, and only detach when the login flow actually
+// ends (/complete, /disconnect, or this isolate being recycled).
+//
+// Deno Edge Function isolates stay warm across closely-spaced requests
+// (this is standard, documented Deno Deploy/Supabase Edge Functions
+// behavior, not a special trick), so module-level state here is reused
+// for the rapid-fire sequence of /type calls a real login produces —
+// email, then password, then Enter, typically seconds apart. A cold
+// start (isolate recycled between calls) just means a fresh attach,
+// which is the same behavior as before this change, not a regression.
+const pageConnections = new Map<string, AttachedPage>();
+
+async function getOrAttachPage(
+  sessionId: string,
+  connectUrl: string,
+  knownTargetId?: string,
+): Promise<AttachedPage> {
+  const cached = pageConnections.get(sessionId);
+  if (cached && cached.ws.readyState === WebSocket.OPEN) return cached;
+  if (cached) pageConnections.delete(sessionId); // stale/closed — drop it, attach fresh below
+
+  const page = await attachToPage(connectUrl, knownTargetId);
+  page.ws.addEventListener("close", () => {
+    // Don't let a closed connection linger in the cache as a false hit.
+    if (pageConnections.get(sessionId) === page) pageConnections.delete(sessionId);
+  });
+  pageConnections.set(sessionId, page);
+  return page;
+}
+
+function closeCachedPage(sessionId: string): void {
+  const cached = pageConnections.get(sessionId);
+  if (cached) {
+    pageConnections.delete(sessionId);
+    try {
+      cached.ws.close();
+    } catch {
+      // already closed — fine, that was the goal anyway.
+    }
+  }
 }
 
 // THE FIX for the "live view shows about:blank" bug: a freshly created
@@ -326,7 +380,12 @@ serve(async (req) => {
     if (dbError) return json({ error: dbError.message }, 500);
 
     return json(
-      data ?? { status: "disconnected", connected_at: null, disconnected_at: null, last_used_at: null },
+      data ?? {
+        status: "disconnected",
+        connected_at: null,
+        disconnected_at: null,
+        last_used_at: null,
+      },
     );
   }
 
@@ -368,7 +427,9 @@ serve(async (req) => {
         }),
       });
       if (!sessionRes.ok) {
-        throw new Error(`Failed to create Browserbase session: ${sessionRes.status} ${await sessionRes.text()}`);
+        throw new Error(
+          `Failed to create Browserbase session: ${sessionRes.status} ${await sessionRes.text()}`,
+        );
       }
       const session = (await sessionRes.json()) as { id: string; connectUrl?: string };
 
@@ -391,7 +452,9 @@ serve(async (req) => {
         headers: bbHeaders(),
       });
       if (!debugRes.ok) {
-        throw new Error(`Failed to fetch live view URL: ${debugRes.status} ${await debugRes.text()}`);
+        throw new Error(
+          `Failed to fetch live view URL: ${debugRes.status} ${await debugRes.text()}`,
+        );
       }
       const debug = (await debugRes.json()) as {
         debuggerFullscreenUrl?: string;
@@ -406,7 +469,10 @@ serve(async (req) => {
         debug.pages?.[0]?.debuggerFullscreenUrl ??
         debug.pages?.[0]?.debuggerUrl;
       if (!liveViewUrl) {
-        console.error("Browserbase /debug returned no usable URL. Raw response:", JSON.stringify(debug));
+        console.error(
+          "Browserbase /debug returned no usable URL. Raw response:",
+          JSON.stringify(debug),
+        );
         throw new Error("Browserbase returned no live view URL for this session.");
       }
 
@@ -523,7 +589,11 @@ serve(async (req) => {
         // A 404 here just means it's already gone -- fine. Anything else is
         // worth logging but shouldn't block clearing our own records.
         if (!delRes.ok && delRes.status !== 404) {
-          console.error("Failed to delete Browserbase context:", delRes.status, await delRes.text());
+          console.error(
+            "Failed to delete Browserbase context:",
+            delRes.status,
+            await delRes.text(),
+          );
         }
       }
 
