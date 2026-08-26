@@ -1,70 +1,58 @@
 // supabase/functions/steel-login/index.ts
 //
 // Replaces browserbase-login as the backend for /notebooks/connect, per
-// user-reported slowness and disconnects with Browserbase. Researched
-// before switching, not assumed: multiple independent 2026 benchmarks
-// consistently rank Browserbase behind on both speed and reliability --
-// "lower-performing providers such as Airtop and Browserbase may rely on
-// slower provisioning queues... significantly higher browsing or total
-// execution times" (aimultiple.com/remote-browsers), and Steel's own
-// session-start time is documented at under 1 second same-region, vs.
-// Browserbase's slower provisioning queue in that same comparison.
-// Reliability: "Steel, Kernel, and Hyperbrowser completed 100 percent of
-// sessions, Browserbase 99.96 percent" (o-mega.ai browser-agent review).
+// user-reported slowness and disconnects with Browserbase. Independently
+// verified against Steel's own docs (not assumed): sub-second same-region
+// session start, and a free tier of 100 browser hours/month with no card.
 //
-// Free tier confirmed directly from Steel's own quickstart docs: 100
-// browser hours/month, no credit card required.
+// PERSISTENCE MECHANISM -- corrected from the first version of this file.
+// That version guessed at a `/sessions/{id}/export` endpoint returning a
+// raw cookie/state blob, stored via Supabase Vault, and flagged that guess
+// explicitly as unverified. Checked against Steel's actual docs before
+// deploying: there is no such endpoint. The real, documented mechanism is
+// the Profiles API -- create a session with `persistProfile: true` to get
+// back a `profileId`, then pass that same `profileId` (plus
+// `persistProfile: true` again, to keep layering state) into future
+// sessions to resume as that logged-in user. Steel persists the actual
+// cookies/storage on ITS side, the same trust model Browserbase's Context
+// object used -- this app only ever stores the opaque profileId, never
+// real session data. That also means Vault is no longer needed for this
+// flow at all: the profileId is stored in the existing browserbase_contexts
+// table (already RLS'd for exactly this shape: user_id + purpose +
+// context_id), just under purpose 'notebooklm_steel' instead of
+// 'notebooklm', so both backends can coexist without collision.
 //
-// ARCHITECTURE DIFFERENCE FROM BROWSERBASE, stated honestly: Browserbase's
-// Context object persists a login server-side on THEIR infrastructure --
-// this app never sees or touches the actual cookies, only an opaque
-// context id. Steel's session-state model is explicit export/import: we
-// call GET .../sessions/{id}/export to retrieve the actual cookie/
-// localStorage state as JSON, and pass it back via `state` when creating
-// a new session to resume as that logged-in user. That means this
-// function DOES handle real cookie/session data directly, which
-// Browserbase's design avoided. To keep the same security bar, that
-// state blob is stored in Supabase Vault (encrypted at rest, service-
-// role-only access) via the same vault_create_secret /
-// vault_delete_secret_by_name RPCs already set up for the earlier
-// notebooklm-connect implementation -- never in a plain table column.
+// KNOWN RISK, carried over deliberately: /type reuses ONE attached CDP
+// connection per session via module-level cache rather than
+// attaching/detaching per call, because repeated Target.attachToTarget
+// cycles on a watched target visibly disrupted Browserbase's Live View
+// (confirmed the hard way earlier tonight). This cache does NOT survive a
+// cold start -- if this function's Deno isolate gets recycled between
+// /start and a later /type call (a real possibility if the user takes a
+// while to react), /type will fail with "No active session found" and the
+// user has to restart the login. There is no serverless-safe way to
+// guarantee a warm isolate; this is a real, known limitation, not a bug
+// being silently ignored.
 //
-// ONE UNVERIFIED DETAIL, flagged rather than silently assumed: the exact
-// field name Steel's CLOUD API (api.steel.dev) uses for session state
-// export/import was only confirmed against a self-hosted example in
-// available documentation snippets at the time this was written (GET
-// /sessions/{id}/export -> POST /sessions with { state: ... }). The SDKs
-// are documented as "compatible with both Steel Cloud and self-hosted
-// instances" via the same client, which suggests the REST shape matches,
-// but if /export 404s or session creation silently ignores `state`,
-// check Steel's OpenAPI reference (docs.steel.dev/api-reference) for the
-// cloud-specific field name before assuming this code is wrong in some
-// deeper way.
-//
-// Everything else mirrors browserbase-login's structure and lessons
-// learned the hard way there:
-//   - /start creates (or resumes, via saved state) a session, navigates
-//     it to NotebookLM, returns sessionViewerUrl for the frontend iframe.
+// Everything else mirrors browserbase-login's structure:
+//   - /start creates (or resumes, via profileId) a session, navigates it
+//     to NotebookLM, returns sessionViewerUrl for the frontend iframe.
+//     Immediately saves the returned profileId, regardless of whether the
+//     user finishes logging in -- harmless if the profile ends up
+//     unauthenticated, it just gets reused and built on next attempt.
 //   - /type forwards locally-typed text into the remote page's focused
 //     field via CDP Input.insertText -- iOS/iPadOS Safari won't raise a
 //     keyboard for an element inside a screencast iframe, so the "type
 //     into browser" box on the frontend exists regardless of which
 //     backend is behind it.
-//   - Reuses ONE attached CDP connection per session across multiple
-//     /type calls (module-level cache), not attach-detach per call --
-//     ported directly from the fix already proven necessary against
-//     Browserbase's Live View for the same reason: repeated
-//     Target.attachToTarget cycles on a watched target visibly disrupt
-//     the live view, confirmed against Browserbase's own commit history
-//     in this repo. Untested whether Steel's viewer has the same
-//     sensitivity, but there's no reason to assume it doesn't and every
-//     reason to keep the safer pattern.
-//   - /complete exports and saves session state, then releases the
-//     session.
-//   - /disconnect deletes the saved state from Vault.
-//   - /status reports connection state from notebooklm_connections
-//     (same table browserbase-login used -- no schema change needed,
-//     this is purely a different login backend for the same feature).
+//   - /complete just releases the session and marks notebooklm_connections
+//     connected -- no export step needed, the profile already has
+//     whatever the user logged into by this point.
+//   - /disconnect removes the saved profileId reference and marks
+//     notebooklm_connections disconnected.
+//   - /status reports connection state from notebooklm_connections (same
+//     table browserbase-login used -- this is purely a different login
+//     backend for the same feature, no schema change needed there).
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -80,6 +68,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !STEEL_API_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const STEEL_API = "https://api.steel.dev/v1";
 const NOTEBOOKLM_URL = "https://notebooklm.google.com/";
+const STEEL_PURPOSE = "notebooklm_steel";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -108,45 +97,41 @@ async function requireUser(req: Request) {
   return { user: data.user };
 }
 
-function vaultSecretName(userId: string): string {
-  return `steel_session_state_${userId}`;
+async function getSavedProfileId(userId: string): Promise<string | null> {
+  const { data } = await supabase
+    .from("browserbase_contexts")
+    .select("context_id")
+    .eq("user_id", userId)
+    .eq("purpose", STEEL_PURPOSE)
+    .maybeSingle();
+  return (data?.context_id as string | undefined) ?? null;
 }
 
-async function getSavedState(userId: string): Promise<unknown | null> {
-  const secretName = vaultSecretName(userId);
-  const { data: decrypted, error } = await supabase.rpc("vault_read_secret_by_name", {
-    secret_name: secretName,
-  });
-  if (error || !decrypted) return null;
-  try {
-    return JSON.parse(decrypted as string);
-  } catch {
-    return null;
-  }
+async function saveProfileId(userId: string, profileId: string): Promise<void> {
+  await supabase
+    .from("browserbase_contexts")
+    .upsert(
+      { user_id: userId, purpose: STEEL_PURPOSE, context_id: profileId },
+      { onConflict: "user_id,purpose" },
+    );
 }
 
-async function saveState(userId: string, state: unknown): Promise<void> {
-  const secretName = vaultSecretName(userId);
-  await supabase.rpc("vault_delete_secret_by_name", { secret_name: secretName }).catch(() => {});
-  const { error } = await supabase.rpc("vault_create_secret", {
-    secret_value: JSON.stringify(state),
-    secret_name: secretName,
-    secret_description: `Steel session state for user ${userId}, saved ${new Date().toISOString()}`,
-  });
-  if (error) throw new Error(`Failed to store session state: ${error.message}`);
-
-  await supabase.from("notebooklm_connections").upsert({
-    user_id: userId,
-    vault_secret_name: secretName,
-    connected_at: new Date().toISOString(),
-    status: "connected",
-  });
+async function markConnected(userId: string): Promise<void> {
+  await supabase.from("notebooklm_connections").upsert(
+    {
+      user_id: userId,
+      vault_secret_name: `steel_profile:${STEEL_PURPOSE}`, // label only, not a secret -- the real state lives in Steel's own Profile, referenced by browserbase_contexts.context_id
+      connected_at: new Date().toISOString(),
+      disconnected_at: null,
+      status: "connected",
+    },
+    { onConflict: "user_id" },
+  );
 }
 
 // --- Minimal CDP client -- identical protocol to browserbase-login's,
 // just pointed at Steel's websocketUrl instead of Browserbase's
-// connectUrl. See that file for the full reasoning on why /type exists
-// and why connections are reused across calls. ---
+// connectUrl. See that file for the full reasoning on why /type exists. ---
 
 interface AttachedPage {
   ws: WebSocket;
@@ -208,8 +193,8 @@ async function attachToPage(wsUrl: string, knownTargetId?: string): Promise<Atta
 }
 
 // Reuses one attached CDP connection per session across multiple /type
-// calls -- see the file header comment for why this is kept even though
-// unverified against Steel specifically.
+// calls -- see the file header comment for the real, stated limitation
+// (doesn't survive a cold start).
 const pageConnections = new Map<string, AttachedPage>();
 
 async function getOrAttachPage(sessionId: string, wsUrl: string, knownTargetId?: string): Promise<AttachedPage> {
@@ -241,6 +226,7 @@ interface SteelSession {
   id: string;
   sessionViewerUrl: string;
   websocketUrl: string;
+  profileId?: string;
 }
 
 serve(async (req) => {
@@ -270,12 +256,23 @@ serve(async (req) => {
     const { user, error } = await requireUser(req);
     if (error) return error;
 
+    if (!STEEL_API_KEY) {
+      return json(
+        { error: "STEEL_API_KEY is not configured on the server. Add it as a secret and redeploy." },
+        503,
+      );
+    }
+
     try {
-      const savedState = await getSavedState(user!.id);
+      const savedProfileId = await getSavedProfileId(user!.id);
       const sessionRes = await fetch(`${STEEL_API}/sessions`, {
         method: "POST",
         headers: steelHeaders(),
-        body: JSON.stringify(savedState ? { state: savedState } : {}),
+        body: JSON.stringify(
+          savedProfileId
+            ? { profileId: savedProfileId, persistProfile: true }
+            : { persistProfile: true },
+        ),
       });
       if (!sessionRes.ok) {
         throw new Error(`Failed to create Steel session: ${sessionRes.status} ${await sessionRes.text()}`);
@@ -283,6 +280,16 @@ serve(async (req) => {
       const session = (await sessionRes.json()) as SteelSession;
       if (!session.sessionViewerUrl || !session.websocketUrl) {
         throw new Error("Steel session response was missing sessionViewerUrl or websocketUrl.");
+      }
+
+      // Save the profileId immediately, not just on /complete -- harmless if
+      // the user abandons the login, it just gets reused and built on next
+      // time, and it means we never lose the reference even if /complete
+      // never gets called.
+      if (session.profileId) {
+        await saveProfileId(user!.id, session.profileId);
+      } else {
+        console.error("Steel session response had no profileId despite persistProfile: true.");
       }
 
       const page = await getOrAttachPage(session.id, session.websocketUrl);
@@ -308,7 +315,10 @@ serve(async (req) => {
     try {
       const cached = pageConnections.get(sessionId);
       if (!cached) {
-        throw new Error("No active session found for this sessionId. Start a new login.");
+        throw new Error(
+          "No active session found for this sessionId -- this function instance was likely " +
+            "recycled between requests. Start a new login.",
+        );
       }
       if (text) await cached.command("Input.insertText", { text });
       if (pressEnter) {
@@ -330,6 +340,8 @@ serve(async (req) => {
   }
 
   // --- POST /complete  { sessionId } ---
+  // No export step needed -- Steel's Profile (persistProfile: true, saved
+  // at /start) already has whatever the user logged into by this point.
   if (req.method === "POST" && path === "/complete") {
     const { user, error } = await requireUser(req);
     if (error) return error;
@@ -340,18 +352,12 @@ serve(async (req) => {
     try {
       closeCachedPage(sessionId);
 
-      const exportRes = await fetch(`${STEEL_API}/sessions/${sessionId}/export`, { headers: steelHeaders() });
-      if (!exportRes.ok) {
-        throw new Error(`Failed to export session state: ${exportRes.status} ${await exportRes.text()}`);
-      }
-      const state = await exportRes.json();
-      await saveState(user!.id, state);
-
       await fetch(`${STEEL_API}/sessions/${sessionId}/release`, {
         method: "POST",
         headers: steelHeaders(),
       }).catch(() => undefined);
 
+      await markConnected(user!.id);
       return json({ ok: true });
     } catch (err) {
       console.error("steel-login /complete failed:", err);
@@ -364,8 +370,12 @@ serve(async (req) => {
     const { user, error } = await requireUser(req);
     if (error) return error;
 
-    const secretName = vaultSecretName(user!.id);
-    await supabase.rpc("vault_delete_secret_by_name", { secret_name: secretName }).catch(() => {});
+    await supabase
+      .from("browserbase_contexts")
+      .delete()
+      .eq("user_id", user!.id)
+      .eq("purpose", STEEL_PURPOSE);
+
     await supabase
       .from("notebooklm_connections")
       .update({ status: "disconnected", disconnected_at: new Date().toISOString() })
