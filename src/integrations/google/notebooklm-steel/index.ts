@@ -4,53 +4,56 @@ import { NexusError } from "@/lib/nexus/errors";
 import { defineAdapter, defineCapability } from "@/lib/nexus/types";
 
 /**
- * NotebookLM integration backed by the SAME Browserbase-captured login the
- * user creates on /notebooks/connect (browserbase_contexts /
- * notebooklm_connections in Supabase, wired up by the browserbase-login
- * Edge Function). This is deliberately NOT the notebooklm-native adapter,
- * which talks to an external, unrelated, and unconfigured community MCP
- * server (PleasePrompto/notebooklm-mcp) that has never touched this login.
+ * NotebookLM integration backed by the SAME Steel-captured login the user
+ * creates on /notebooks/connect (notebooklm_connections + Vault-stored
+ * session state, wired up by the steel-login Edge Function). Replaces the
+ * earlier Browserbase-backed version of this adapter after the login
+ * backend was switched to Steel per user-reported slowness/disconnects
+ * with Browserbase — kept the old one around would have meant it silently
+ * stopped working the moment steel-login stopped populating
+ * browserbase_contexts, which is exactly the kind of dead-parallel-code
+ * confusion found and cleaned up multiple times already in this repo.
  *
- * Scope, honestly: only get_health and list_notebooks are implemented.
- * NotebookLM's real page structure (for asking questions, adding sources,
- * generating audio) is not something this adapter's author can inspect or
- * test live -- guessing at DOM selectors for those would risk either
- * silent failures or, worse for `ask`, plausible-looking but fabricated
- * answers. list_notebooks only reads notebook links by URL pattern
- * (/notebook/<id>), which is a stable, documented NotebookLM URL
- * convention rather than a guessed CSS selector, so it's a much safer bet.
+ * Scope, honestly, unchanged from the Browserbase version: only
+ * get_health and list_notebooks are implemented. NotebookLM's real page
+ * structure (for asking questions, adding sources, generating audio) is
+ * not something this adapter's author can inspect or test live — guessing
+ * at DOM selectors for those would risk either silent failures or, worse
+ * for `ask`, plausible-looking but fabricated answers. list_notebooks
+ * only reads notebook links by URL pattern (/notebook/<id>), a stable,
+ * documented NotebookLM URL convention rather than a guessed CSS
+ * selector, so it's a much safer bet.
  *
- * Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID as environment
- * variables on THIS app (Lovable project env vars) -- a separate secret
- * store from the Supabase Edge Function secrets already configured for
- * browserbase-login. Same free Browserbase account, just needs the same
- * two values set again here.
+ * Requires STEEL_API_KEY as an environment variable on THIS app (Lovable
+ * project env vars) — a separate secret store from the Supabase Edge
+ * Function secret already configured for steel-login. Same free Steel
+ * account, just needs the same value set again here.
  */
 
-const BROWSERBASE_API = "https://api.browserbase.com/v1";
-const NOTEBOOKLM_PURPOSE = "notebooklm";
+const STEEL_API = "https://api.steel.dev/v1";
 const NOTEBOOKLM_URL = "https://notebooklm.google.com/";
 const CDP_TIMEOUT_MS = 8_000;
 const PAGE_LOAD_TIMEOUT_MS = 15_000;
 const POST_LOAD_SETTLE_MS = 1_500;
 
-function requireBrowserbaseConfig(): { apiKey: string; projectId: string } {
-  const apiKey = process.env["BROWSERBASE_API_KEY"]?.trim();
-  const projectId = process.env["BROWSERBASE_PROJECT_ID"]?.trim();
-  if (!apiKey || !projectId) {
+function requireSteelConfig(): { apiKey: string } {
+  const apiKey = process.env["STEEL_API_KEY"]?.trim();
+  if (!apiKey) {
     throw new NexusError(
-      "notebooklm_browserbase_not_configured",
-      "BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID must be set as environment variables " +
-        "on this app (separate from the same-named Supabase Edge Function secrets already " +
-        "configured for browserbase-login -- Lovable env vars are a different store).",
+      "notebooklm_steel_not_configured",
+      "STEEL_API_KEY must be set as an environment variable on this app (separate from the " +
+        "same-named Supabase Edge Function secret already configured for steel-login — Lovable " +
+        "env vars are a different store).",
       503,
     );
   }
-  return { apiKey, projectId };
+  return { apiKey };
 }
 
-function bbHeaders(apiKey: string): Record<string, string> {
-  return { "X-BB-API-Key": apiKey, "Content-Type": "application/json" };
+function steelHeaders(apiKey: string): Record<string, string> {
+  // Confirmed directly from Steel's own auth docs: send the key in the
+  // steel-api-key header (lowercase) for direct REST calls.
+  return { "steel-api-key": apiKey, "content-type": "application/json" };
 }
 
 async function admin() {
@@ -58,29 +61,35 @@ async function admin() {
   return supabaseAdmin;
 }
 
-/** The context id captured when the user logged in via /notebooks/connect. */
-async function getStoredContextId(userId: string): Promise<string> {
+/** The exported cookie/localStorage state saved when the user logged in via /notebooks/connect. */
+async function getSavedState(userId: string): Promise<unknown> {
   const db = await admin();
-  const { data, error } = await db
-    .from("browserbase_contexts")
-    .select("context_id")
-    .eq("user_id", userId)
-    .eq("purpose", NOTEBOOKLM_PURPOSE)
-    .maybeSingle();
+  const secretName = `steel_session_state_${userId}`;
+  const { data: decrypted, error } = await db.rpc("vault_read_secret_by_name", {
+    secret_name: secretName,
+  });
   if (error) throw error;
-  if (!data?.context_id) {
+  if (!decrypted) {
     throw new NexusError(
       "notebooklm_not_connected",
       "No NotebookLM login found for this user. Visit /notebooks/connect and log in first.",
       412,
     );
   }
-  return data.context_id as string;
+  try {
+    return JSON.parse(decrypted as string);
+  } catch {
+    throw new NexusError(
+      "notebooklm_saved_state_corrupt",
+      "The saved NotebookLM login could not be read. Reconnect via /notebooks/connect.",
+      500,
+    );
+  }
 }
 
-// --- Minimal CDP client (same technique as the browserbase-login Edge
-// Function's /type endpoint, reimplemented here since this runs in a
-// separate Node process with its own module scope, not Deno). ---
+// --- Minimal CDP client (same technique as steel-login's Edge Function
+// /type endpoint, reimplemented here since this runs in a separate Node
+// process with its own module scope, not Deno). ---
 
 interface CdpPage {
   ws: WebSocket;
@@ -91,11 +100,11 @@ interface CdpPage {
   waitForEvent: (method: string, timeoutMs: number) => Promise<void>;
 }
 
-async function attachToPage(connectUrl: string): Promise<CdpPage> {
-  const ws = new WebSocket(connectUrl);
+async function attachToPage(wsUrl: string): Promise<CdpPage> {
+  const ws = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
-    ws.onerror = () => reject(new Error("Failed to open CDP WebSocket to Browserbase session"));
+    ws.onerror = () => reject(new Error("Failed to open CDP WebSocket to Steel session"));
   });
 
   let nextId = 1;
@@ -140,20 +149,20 @@ async function attachToPage(connectUrl: string): Promise<CdpPage> {
   const targetInfos =
     (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
   const pageTarget = targetInfos.find((t) => t.type === "page");
-  if (!pageTarget) throw new Error("No page target found on the Browserbase session");
+  if (!pageTarget) throw new Error("No page target found on the Steel session");
 
   const attachRes = await waitFor(
     send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
   );
   const pageSessionId = attachRes.result?.["sessionId"] as string | undefined;
-  if (!pageSessionId) throw new Error("Failed to attach to the Browserbase session's page target");
+  if (!pageSessionId) throw new Error("Failed to attach to the Steel session's page target");
 
   const page: CdpPage = {
     ws,
     command: (method, params = {}) => waitFor(send(method, params, pageSessionId)),
     waitForEvent: (method, timeoutMs) =>
       new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, timeoutMs); // timeout resolves too -- best-effort wait, not a hard requirement
+        const timeout = setTimeout(resolve, timeoutMs); // timeout resolves too -- best-effort wait
         const list = eventWaiters.get(method) ?? [];
         list.push(() => {
           clearTimeout(timeout);
@@ -169,48 +178,43 @@ async function attachToPage(connectUrl: string): Promise<CdpPage> {
 }
 
 /**
- * Opens a short-lived Browserbase session bound to the user's saved
- * NotebookLM context, navigates to a URL, waits for it to settle, runs
- * `evaluate` against the live page, then always closes the session
- * (REQUEST_RELEASE) so it doesn't sit consuming one of the free tier's 3
- * concurrent-session slots. Read-only by design -- this never types
- * anything or clicks anything, only reads page state.
+ * Opens a short-lived Steel session pre-loaded with the user's saved
+ * NotebookLM cookie state, navigates to a URL, waits for it to settle,
+ * runs `evaluate` against the live page, then always releases the session.
+ * Read-only by design -- this never types anything or clicks anything,
+ * only reads page state.
  */
 async function withNotebookLmPage<T>(
   userId: string,
   targetUrl: string,
   evaluate: (page: CdpPage) => Promise<T>,
 ): Promise<{ result: T; finalUrl: string }> {
-  const { apiKey, projectId } = requireBrowserbaseConfig();
-  const contextId = await getStoredContextId(userId);
+  const { apiKey } = requireSteelConfig();
+  const state = await getSavedState(userId);
 
-  const sessionRes = await fetch(`${BROWSERBASE_API}/sessions`, {
+  const sessionRes = await fetch(`${STEEL_API}/sessions`, {
     method: "POST",
-    headers: bbHeaders(apiKey),
-    body: JSON.stringify({
-      projectId,
-      browserSettings: { context: { id: contextId, persist: true } },
-      timeout: 60, // this is a quick read, not an interactive login -- no need for a long-lived slot
-    }),
+    headers: steelHeaders(apiKey),
+    body: JSON.stringify({ state, timeout: 60_000 }), // quick read, not an interactive login
   });
   if (!sessionRes.ok) {
     throw new NexusError(
-      "notebooklm_browserbase_session_failed",
-      `Failed to create a Browserbase session: ${sessionRes.status} ${await sessionRes.text()}`,
+      "notebooklm_steel_session_failed",
+      `Failed to create a Steel session: ${sessionRes.status} ${await sessionRes.text()}`,
       502,
     );
   }
-  const session = (await sessionRes.json()) as { id: string; connectUrl?: string };
-  if (!session.connectUrl) {
+  const session = (await sessionRes.json()) as { id: string; websocketUrl?: string };
+  if (!session.websocketUrl) {
     throw new NexusError(
-      "notebooklm_browserbase_session_failed",
-      "Browserbase session response had no connectUrl.",
+      "notebooklm_steel_session_failed",
+      "Steel session response had no websocketUrl.",
       502,
     );
   }
 
   try {
-    const page = await attachToPage(session.connectUrl);
+    const page = await attachToPage(session.websocketUrl);
     await page.command("Page.navigate", { url: targetUrl });
     await page.waitForEvent("Page.loadEventFired", PAGE_LOAD_TIMEOUT_MS);
     // NotebookLM is a client-rendered SPA -- the network "load" event fires
@@ -229,11 +233,10 @@ async function withNotebookLmPage<T>(
     return { result, finalUrl };
   } finally {
     // Best-effort -- a failed release just means the session times out on
-    // its own after the short `timeout` set above instead of closing early.
-    await fetch(`${BROWSERBASE_API}/sessions/${session.id}`, {
+    // its own after the short timeout set above instead of closing early.
+    await fetch(`${STEEL_API}/sessions/${session.id}/release`, {
       method: "POST",
-      headers: bbHeaders(apiKey),
-      body: JSON.stringify({ projectId, status: "REQUEST_RELEASE" }),
+      headers: steelHeaders(apiKey),
     }).catch(() => undefined);
   }
 }
@@ -247,7 +250,7 @@ async function evaluateJson<T>(page: CdpPage, expression: string): Promise<T> {
   const result = res.result?.["result"] as { value?: unknown; subtype?: string } | undefined;
   if (result?.subtype === "error") {
     throw new NexusError(
-      "notebooklm_browserbase_eval_failed",
+      "notebooklm_steel_eval_failed",
       "Failed to read the NotebookLM page.",
       502,
     );
@@ -255,11 +258,11 @@ async function evaluateJson<T>(page: CdpPage, expression: string): Promise<T> {
   return (result?.value ?? null) as T;
 }
 
-export const notebooklmBrowserbaseAdapter = defineAdapter({
-  service: "notebooklm-browserbase",
-  label: "NotebookLM (your Browserbase login)",
+export const notebooklmSteelAdapter = defineAdapter({
+  service: "notebooklm-steel",
+  label: "NotebookLM (your Steel login)",
   description:
-    "Reads real NotebookLM data using the login captured on /notebooks/connect (Browserbase), " +
+    "Reads real NotebookLM data using the login captured on /notebooks/connect (Steel), " +
     "instead of the separate, unconfigured notebooklm-native/PleasePrompto integration.",
   status: "partial",
   statusNote:
@@ -267,13 +270,13 @@ export const notebooklmBrowserbaseAdapter = defineAdapter({
     "list. Asking questions, adding sources, and generating audio are not implemented: they'd " +
     "require guessing at NotebookLM's live DOM structure with no way to verify it, which risks " +
     "silent failures or (for asking questions specifically) plausible-looking fabricated answers. " +
-    "Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID set as env vars on this app.",
+    "Requires STEEL_API_KEY set as an env var on this app.",
   requiresGoogleAuth: false,
-  docsUrl: "https://docs.browserbase.com",
+  docsUrl: "https://docs.steel.dev",
   capabilities: [
     defineCapability({
-      id: "notebooklm_browserbase.get_health",
-      title: "Check NotebookLM login (Browserbase)",
+      id: "notebooklm_steel.get_health",
+      title: "Check NotebookLM login (Steel)",
       description:
         "Opens the saved NotebookLM login in a real (throwaway) browser session and reports " +
         "whether it's still authenticated, based on whether Google bounced it to a login page.",
@@ -295,8 +298,8 @@ export const notebooklmBrowserbaseAdapter = defineAdapter({
       },
     }),
     defineCapability({
-      id: "notebooklm_browserbase.list_notebooks",
-      title: "List NotebookLM notebooks (Browserbase)",
+      id: "notebooklm_steel.list_notebooks",
+      title: "List NotebookLM notebooks (Steel)",
       description:
         "Lists notebooks visible on the NotebookLM homepage for the connected account, read from " +
         "real notebook links (/notebook/<id>) on the live page.",
@@ -336,4 +339,4 @@ export const notebooklmBrowserbaseAdapter = defineAdapter({
   ],
 });
 
-export default notebooklmBrowserbaseAdapter;
+export default notebooklmSteelAdapter;

@@ -21,7 +21,7 @@ import meetAdapter from "@/integrations/google/meet/index";
 import musicAdapter from "@/integrations/google/music/index";
 import notebooklmAdapter from "@/integrations/google/notebooklm/index";
 import notebooklmNativeAdapter from "@/integrations/google/notebooklm-native/index";
-import notebooklmBrowserbaseAdapter from "@/integrations/google/notebooklm-browserbase/index";
+import notebooklmSteelAdapter from "@/integrations/google/notebooklm-steel/index";
 import notebookEnterpriseAdapter from "@/integrations/google/notebook-enterprise/index";
 import sheetsAdapter from "@/integrations/google/sheets/index";
 import slidesAdapter from "@/integrations/google/slides/index";
@@ -56,7 +56,7 @@ export const ADAPTERS: GoogleAdapter[] = [
   flowAdapter,
   notebooklmAdapter,
   notebooklmNativeAdapter,
-  notebooklmBrowserbaseAdapter,
+  notebooklmSteelAdapter,
   notebookEnterpriseAdapter,
   cloudAiAdapter,
   cloudDataAdapter,

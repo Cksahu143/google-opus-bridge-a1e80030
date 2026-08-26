@@ -1,8 +1,8 @@
 project_id = "bjamfhlopmawtnzwwicu"
 
-# browserbase-login is called straight from the browser and does its own
+# steel-login is called straight from the browser and does its own
 # JWT verification (requireUser) inside the handler. Platform-level JWT
 # verification has to be off so CORS preflight (OPTIONS, no Authorization
 # header) isn't rejected before the function ever runs.
-[functions.browserbase-login]
+[functions.steel-login]
 verify_jwt = false

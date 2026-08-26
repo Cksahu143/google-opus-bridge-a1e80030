@@ -57,7 +57,7 @@ export const Route = createFileRoute("/notebooks/connect")({
 });
 
 // Base URL for this project's Supabase Edge Functions. All of /start,
-// /type, /complete, /disconnect and /status go through browserbase-login,
+// /type, /complete, /disconnect and /status go through steel-login,
 // authenticated with the signed-in user's own JWT (see authHeader()).
 // Derived from the project's Supabase URL so there is no extra env var to
 // forget (VITE_SUPABASE_FUNCTIONS_URL still wins if it's set explicitly).
@@ -80,7 +80,7 @@ function ConnectNotebookLmPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const callCapability = useServerFn(runNexusCapability);
 
-  // Actually exercises the notebooklm_browserbase adapter registered on
+  // Actually exercises the notebooklm_steel adapter registered on
   // top of this login, instead of just claiming "Claude can use this now"
   // with no way to verify it from the page itself.
   const [toolState, setToolState] = useState<
@@ -93,9 +93,7 @@ function ConnectNotebookLmPage() {
   async function runTool(tool: "health" | "list") {
     setToolState({ kind: "running", tool });
     const capabilityId =
-      tool === "health"
-        ? "notebooklm_browserbase.get_health"
-        : "notebooklm_browserbase.list_notebooks";
+      tool === "health" ? "notebooklm_steel.get_health" : "notebooklm_steel.list_notebooks";
     try {
       const result = await callCapability({ data: { capabilityId, input: {} } });
       if (!result.ok) throw new Error(result.error ?? "Request failed");
@@ -119,7 +117,7 @@ function ConnectNotebookLmPage() {
   async function checkStatus() {
     try {
       const headers = await authHeader();
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/status`, { headers });
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/status`, { headers });
       if (!res.ok) throw new Error(await res.text());
       const data = (await res.json()) as { status: string; connected_at: string | null };
       setState(
@@ -162,7 +160,7 @@ function ConnectNotebookLmPage() {
     setState({ step: "starting" });
     try {
       const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/start`, {
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/start`, {
         method: "POST",
         headers,
       });
@@ -174,10 +172,9 @@ function ConnectNotebookLmPage() {
         // means <iframe src={undefined}> silently renders about:blank
         // with no visible error at all. Fail loudly instead.
         throw new Error(
-          "Browserbase did not return a live view URL. Check that BROWSERBASE_API_KEY and " +
-            "BROWSERBASE_PROJECT_ID are set as secrets on the browserbase-login Edge Function " +
-            "specifically (Supabase dashboard → Edge Functions → browserbase-login → Secrets) " +
-            "— a Lovable frontend env var alone is not visible to this function.",
+          "Steel did not return a live view URL. Check that STEEL_API_KEY is set as a secret on " +
+            "the steel-login Edge Function specifically (Supabase dashboard → Edge Functions → " +
+            "steel-login → Secrets) — a Lovable frontend env var alone is not visible to this function.",
         );
       }
       sessionIdRef.current = sessionId;
@@ -210,7 +207,7 @@ function ConnectNotebookLmPage() {
     setTyping(true);
     try {
       const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/type`, {
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/type`, {
         method: "POST",
         headers,
         body: JSON.stringify({ sessionId: state.sessionId, text: typeValue, pressEnter }),
@@ -229,7 +226,7 @@ function ConnectNotebookLmPage() {
     setState({ step: "completing", sessionId });
     try {
       const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/complete`, {
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/complete`, {
         method: "POST",
         headers,
         body: JSON.stringify({ sessionId }),
@@ -246,7 +243,7 @@ function ConnectNotebookLmPage() {
     setState({ step: "disconnecting" });
     try {
       const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/browserbase-login/disconnect`, {
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/disconnect`, {
         method: "POST",
         headers,
       });
