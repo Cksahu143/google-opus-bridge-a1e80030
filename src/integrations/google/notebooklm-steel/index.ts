@@ -5,33 +5,43 @@ import { defineAdapter, defineCapability } from "@/lib/nexus/types";
 
 /**
  * NotebookLM integration backed by the SAME Steel-captured login the user
- * creates on /notebooks/connect (notebooklm_connections + Vault-stored
- * session state, wired up by the steel-login Edge Function). Replaces the
- * earlier Browserbase-backed version of this adapter after the login
- * backend was switched to Steel per user-reported slowness/disconnects
- * with Browserbase — kept the old one around would have meant it silently
- * stopped working the moment steel-login stopped populating
- * browserbase_contexts, which is exactly the kind of dead-parallel-code
- * confusion found and cleaned up multiple times already in this repo.
+ * creates on /notebooks/connect (notebooklm_connections + a profileId in
+ * browserbase_contexts, wired up by the steel-login Edge Function).
+ * Replaces the earlier Browserbase-backed version of this adapter after
+ * the login backend was switched to Steel per user-reported
+ * slowness/disconnects with Browserbase.
  *
- * Scope, honestly, unchanged from the Browserbase version: only
- * get_health and list_notebooks are implemented. NotebookLM's real page
- * structure (for asking questions, adding sources, generating audio) is
- * not something this adapter's author can inspect or test live — guessing
- * at DOM selectors for those would risk either silent failures or, worse
- * for `ask`, plausible-looking but fabricated answers. list_notebooks
- * only reads notebook links by URL pattern (/notebook/<id>), a stable,
- * documented NotebookLM URL convention rather than a guessed CSS
- * selector, so it's a much safer bet.
+ * PERSISTENCE MECHANISM -- corrected from the first version of this file,
+ * which read a Vault secret (`steel_session_state_${userId}`) that
+ * steel-login itself no longer writes. steel-login was rewritten to use
+ * Steel's actual documented Profiles API (`persistProfile: true` /
+ * `profileId`) instead of a guessed `/export` endpoint that doesn't
+ * exist -- see steel-login's own file header for the full story. This
+ * adapter now reads the same `profileId` steel-login saves, from the same
+ * browserbase_contexts table (purpose 'notebooklm_steel'), and passes it
+ * into new Steel sessions the same way steel-login does. No Vault
+ * involvement at all for this backend -- Steel persists the real
+ * cookies/storage on its own side.
+ *
+ * Scope, honestly, unchanged: only get_health and list_notebooks are
+ * implemented. NotebookLM's real page structure (for asking questions,
+ * adding sources, generating audio) is not something this adapter's
+ * author can inspect or test live -- guessing at DOM selectors for those
+ * would risk either silent failures or, worse for `ask`, plausible-
+ * looking but fabricated answers. list_notebooks only reads notebook
+ * links by URL pattern (/notebook/<id>), a stable, documented NotebookLM
+ * URL convention rather than a guessed CSS selector, so it's a much safer
+ * bet.
  *
  * Requires STEEL_API_KEY as an environment variable on THIS app (Lovable
- * project env vars) — a separate secret store from the Supabase Edge
+ * project env vars) -- a separate secret store from the Supabase Edge
  * Function secret already configured for steel-login. Same free Steel
  * account, just needs the same value set again here.
  */
 
 const STEEL_API = "https://api.steel.dev/v1";
 const NOTEBOOKLM_URL = "https://notebooklm.google.com/";
+const STEEL_PURPOSE = "notebooklm_steel"; // matches steel-login's STEEL_PURPOSE exactly
 const CDP_TIMEOUT_MS = 8_000;
 const PAGE_LOAD_TIMEOUT_MS = 15_000;
 const POST_LOAD_SETTLE_MS = 1_500;
@@ -42,7 +52,7 @@ function requireSteelConfig(): { apiKey: string } {
     throw new NexusError(
       "notebooklm_steel_not_configured",
       "STEEL_API_KEY must be set as an environment variable on this app (separate from the " +
-        "same-named Supabase Edge Function secret already configured for steel-login — Lovable " +
+        "same-named Supabase Edge Function secret already configured for steel-login -- Lovable " +
         "env vars are a different store).",
       503,
     );
@@ -61,30 +71,24 @@ async function admin() {
   return supabaseAdmin;
 }
 
-/** The exported cookie/localStorage state saved when the user logged in via /notebooks/connect. */
-async function getSavedState(userId: string): Promise<unknown> {
+/** The Steel profileId saved when the user logged in via /notebooks/connect. */
+async function getSavedProfileId(userId: string): Promise<string> {
   const db = await admin();
-  const secretName = `steel_session_state_${userId}`;
-  const { data: decrypted, error } = await db.rpc("vault_read_secret_by_name", {
-    secret_name: secretName,
-  });
+  const { data, error } = await db
+    .from("browserbase_contexts")
+    .select("context_id")
+    .eq("user_id", userId)
+    .eq("purpose", STEEL_PURPOSE)
+    .maybeSingle();
   if (error) throw error;
-  if (!decrypted) {
+  if (!data?.context_id) {
     throw new NexusError(
       "notebooklm_not_connected",
       "No NotebookLM login found for this user. Visit /notebooks/connect and log in first.",
       412,
     );
   }
-  try {
-    return JSON.parse(decrypted as string);
-  } catch {
-    throw new NexusError(
-      "notebooklm_saved_state_corrupt",
-      "The saved NotebookLM login could not be read. Reconnect via /notebooks/connect.",
-      500,
-    );
-  }
+  return data.context_id as string;
 }
 
 // --- Minimal CDP client (same technique as steel-login's Edge Function
@@ -178,11 +182,11 @@ async function attachToPage(wsUrl: string): Promise<CdpPage> {
 }
 
 /**
- * Opens a short-lived Steel session pre-loaded with the user's saved
- * NotebookLM cookie state, navigates to a URL, waits for it to settle,
- * runs `evaluate` against the live page, then always releases the session.
- * Read-only by design -- this never types anything or clicks anything,
- * only reads page state.
+ * Opens a short-lived Steel session resumed from the user's saved profile
+ * (profileId + persistProfile: true, the same pattern steel-login uses),
+ * navigates to a URL, waits for it to settle, runs `evaluate` against the
+ * live page, then always releases the session. Read-only by design --
+ * this never types anything or clicks anything, only reads page state.
  */
 async function withNotebookLmPage<T>(
   userId: string,
@@ -190,12 +194,12 @@ async function withNotebookLmPage<T>(
   evaluate: (page: CdpPage) => Promise<T>,
 ): Promise<{ result: T; finalUrl: string }> {
   const { apiKey } = requireSteelConfig();
-  const state = await getSavedState(userId);
+  const profileId = await getSavedProfileId(userId);
 
   const sessionRes = await fetch(`${STEEL_API}/sessions`, {
     method: "POST",
     headers: steelHeaders(apiKey),
-    body: JSON.stringify({ state, timeout: 60_000 }), // quick read, not an interactive login
+    body: JSON.stringify({ profileId, persistProfile: true, timeout: 60_000 }), // quick read, not an interactive login
   });
   if (!sessionRes.ok) {
     throw new NexusError(
