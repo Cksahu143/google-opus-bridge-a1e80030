@@ -7,6 +7,58 @@ import type { AdapterContext } from "./types";
 
 export type Actor = "web" | "mcp" | "workflow";
 
+// Live "Claude is doing X right now" status, distinct from the
+// after-the-fact operation_logs write below. Best-effort throughout: a
+// failure to write activity_events must never break the actual
+// capability call, so every call here is wrapped and swallows its own
+// errors. Returns the row id (or null on failure) so the caller can mark
+// it finished afterward.
+async function startActivityEvent(params: {
+  userId: string;
+  capabilityId: string;
+  service: string;
+  title: string;
+  actor: Actor;
+}): Promise<string | null> {
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data, error } = await supabaseAdmin
+      .from("activity_events")
+      .insert({
+        user_id: params.userId,
+        capability_id: params.capabilityId,
+        service: params.service,
+        title: params.title,
+        actor: params.actor,
+        status: "running",
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+    return data?.id ?? null;
+  } catch (err) {
+    console.error("Failed to write activity_events start row (non-fatal):", err);
+    return null;
+  }
+}
+
+async function finishActivityEvent(
+  eventId: string | null,
+  status: "done" | "error",
+  detail?: string,
+): Promise<void> {
+  if (!eventId) return;
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    await supabaseAdmin
+      .from("activity_events")
+      .update({ status, detail: detail ?? null, finished_at: new Date().toISOString() })
+      .eq("id", eventId);
+  } catch (err) {
+    console.error("Failed to write activity_events finish row (non-fatal):", err);
+  }
+}
+
 /**
  * The single entry point every surface (dashboard, MCP tools, workflows) uses to
  * run a capability. It resolves the adapter, validates input, enforces scopes
@@ -60,9 +112,18 @@ export async function runCapability(params: {
     };
   }
 
+  const activityEventId = await startActivityEvent({
+    userId: params.userId,
+    capabilityId: capability.id,
+    service: adapter.service,
+    title: capability.title,
+    actor: params.actor,
+  });
+
   const startedAt = Date.now();
   try {
     const result = await capability.run(ctx, parsed.data as never);
+    await finishActivityEvent(activityEventId, "done");
     await logOperation({
       userId: params.userId,
       service: adapter.service,
@@ -75,6 +136,7 @@ export async function runCapability(params: {
     });
     return result;
   } catch (error) {
+    await finishActivityEvent(activityEventId, "error", (error as Error).message);
     await logOperation({
       userId: params.userId,
       service: adapter.service,
