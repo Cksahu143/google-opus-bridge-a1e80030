@@ -11,6 +11,7 @@ import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { ActivityIndicator } from "../components/ActivityIndicator";
 
 function NotFoundComponent() {
   return (
@@ -128,6 +129,11 @@ function RootComponent() {
     <QueryClientProvider client={queryClient}>
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <Outlet />
+      {/* Site-wide: shows live when Claude (via MCP) or this app's own
+          dashboard is running a Nexus capability. Backed by
+          activity_events + Supabase Realtime -- see router.server.ts and
+          ActivityIndicator.tsx. Renders nothing when idle. */}
+      <ActivityIndicator />
     </QueryClientProvider>
   );
 }
