@@ -104,10 +104,18 @@ export async function runCapability(params: {
     ctx = {
       userId: params.userId,
       api: async () => {
-        throw new NexusError("no_google_context", "This capability does not use Google OAuth.", 500);
+        throw new NexusError(
+          "no_google_context",
+          "This capability does not use Google OAuth.",
+          500,
+        );
       },
       raw: async () => {
-        throw new NexusError("no_google_context", "This capability does not use Google OAuth.", 500);
+        throw new NexusError(
+          "no_google_context",
+          "This capability does not use Google OAuth.",
+          500,
+        );
       },
     };
   }

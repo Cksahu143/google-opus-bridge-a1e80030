@@ -13,6 +13,7 @@ import gmailAdapter from "@/integrations/google/gmail/index";
 import githubAdapter from "@/integrations/github/index";
 import browserAdapter from "@/integrations/browser/index";
 import steelBrowserAdapter from "@/integrations/steel-browser/index";
+import designSystemAdapter from "@/integrations/design-system/index";
 import replicateAdapter from "@/integrations/replicate/index";
 import huggingfaceAdapter from "@/integrations/huggingface/index";
 import daytonaAdapter from "@/integrations/daytona/index";
@@ -64,6 +65,7 @@ export const ADAPTERS: GoogleAdapter[] = [
   githubAdapter,
   browserAdapter,
   steelBrowserAdapter,
+  designSystemAdapter,
   replicateAdapter,
   huggingfaceAdapter,
   daytonaAdapter,
