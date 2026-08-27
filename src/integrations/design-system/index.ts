@@ -139,6 +139,141 @@ const MOTION_PRESETS: Record<string, (durationMs: number) => string> = {
     `.scroll-reveal {\n  animation: fade-in linear both;\n  animation-timeline: view();\n  animation-range: entry 0% cover 30%;\n}\n@keyframes fade-in {\n  from { opacity: 0; transform: translateY(24px); }\n  to { opacity: 1; transform: translateY(0); }\n}\n/* Native CSS Scroll-Driven Animations -- no JS, per 2026 platform-first guidance. */`,
 };
 
+/**
+ * Builds a real, working exploded-view scroll animation (e.g. "phone
+ * disassembles as you scroll") using native CSS Scroll-Driven Animations
+ * (animation-timeline: scroll()) -- per DESIGN_SYSTEM.md's own 2026
+ * guidance to default to the platform before reaching for a JS library.
+ * No GSAP/JS dependency: pure CSS, works in a single self-contained HTML
+ * document Claude can render directly via its Visualizer.
+ */
+function buildScrollSequenceHtml(params: {
+  pieces: {
+    name: string;
+    color: string;
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+    endRotate: number;
+  }[];
+  title: string;
+}): string {
+  const pieceDivs = params.pieces
+    .map(
+      (p, i) =>
+        `<div class="piece piece-${i}" style="--start-x:${p.startX}px;--start-y:${p.startY}px;--end-x:${p.endX}px;--end-y:${p.endY}px;--end-rot:${p.endRotate}deg;background:${p.color};">${p.name}</div>`,
+    )
+    .join("\n");
+  const pieceCss = params.pieces
+    .map(
+      (_p, i) => `.piece-${i} {
+  animation: explode-${i} linear both;
+  animation-timeline: scroll(root block);
+  animation-range: 0% 100%;
+}
+@keyframes explode-${i} {
+  from { transform: translate(var(--start-x), var(--start-y)) rotate(0deg); }
+  to { transform: translate(var(--end-x), var(--end-y)) rotate(var(--end-rot)); }
+}`,
+    )
+    .join("\n");
+  return `<div style="height:300vh; position:relative;">
+  <div style="position:sticky; top:0; height:100vh; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#0f172a;">
+    <h2 style="position:absolute; top:24px; color:#e2e8f0; font-family:sans-serif; font-size:14px; opacity:0.7;">${params.title} -- scroll to disassemble</h2>
+    <div style="position:relative; width:200px; height:400px;">
+      ${pieceDivs}
+    </div>
+  </div>
+  <style>
+    .piece { position:absolute; inset:0; border-radius:12px; display:flex; align-items:center; justify-content:center; color:white; font-family:sans-serif; font-size:12px; opacity:0.95; }
+    ${pieceCss}
+  </style>
+</div>`;
+}
+
+const EXPLODED_TEMPLATES: Record<
+  string,
+  () => {
+    name: string;
+    color: string;
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+    endRotate: number;
+  }[]
+> = {
+  phone: () => [
+    { name: "Screen", color: "#1e293b", startX: 0, startY: 0, endX: 0, endY: -160, endRotate: -8 },
+    { name: "Battery", color: "#334155", startX: 0, startY: 0, endX: -140, endY: 0, endRotate: 12 },
+    {
+      name: "Logic Board",
+      color: "#475569",
+      startX: 0,
+      startY: 0,
+      endX: 140,
+      endY: 0,
+      endRotate: -12,
+    },
+    {
+      name: "Camera Module",
+      color: "#64748b",
+      startX: 0,
+      startY: 0,
+      endX: -90,
+      endY: 160,
+      endRotate: 20,
+    },
+    {
+      name: "Back Case",
+      color: "#94a3b8",
+      startX: 0,
+      startY: 0,
+      endX: 90,
+      endY: 160,
+      endRotate: -20,
+    },
+  ],
+  laptop: () => [
+    {
+      name: "Display",
+      color: "#1e293b",
+      startX: 0,
+      startY: 0,
+      endX: 0,
+      endY: -180,
+      endRotate: -15,
+    },
+    { name: "Keyboard", color: "#334155", startX: 0, startY: 0, endX: 0, endY: -40, endRotate: 0 },
+    { name: "Trackpad", color: "#475569", startX: 0, startY: 0, endX: 0, endY: 60, endRotate: 0 },
+    {
+      name: "Battery",
+      color: "#64748b",
+      startX: 0,
+      startY: 0,
+      endX: -150,
+      endY: 40,
+      endRotate: 10,
+    },
+    {
+      name: "Chassis",
+      color: "#94a3b8",
+      startX: 0,
+      startY: 0,
+      endX: 150,
+      endY: 40,
+      endRotate: -10,
+    },
+  ],
+  watch: () => [
+    { name: "Face", color: "#1e293b", startX: 0, startY: 0, endX: 0, endY: -140, endRotate: -10 },
+    { name: "Battery", color: "#334155", startX: 0, startY: 0, endX: -100, endY: 0, endRotate: 8 },
+    { name: "Sensors", color: "#475569", startX: 0, startY: 0, endX: 100, endY: 0, endRotate: -8 },
+    { name: "Band", color: "#94a3b8", startX: 0, startY: 0, endX: 0, endY: 140, endRotate: 0 },
+  ],
+};
+
 export const designSystemAdapter = defineAdapter({
   service: "design-system",
   label: "Design System",
@@ -234,6 +369,27 @@ export const designSystemAdapter = defineAdapter({
           spacingScale,
           colorRamp: ramp,
           css: `:root {\n${cssVars}\n}`,
+        };
+      },
+    }),
+    defineCapability({
+      id: "design_system.generate_scroll_sequence",
+      title: "Generate a scroll-driven exploded-view animation",
+      description:
+        "Generates a real, working HTML/CSS scroll sequence where an object's parts fly apart as the page scrolls (e.g. a phone disassembling) -- pure CSS Scroll-Driven Animations, no JS library, ready to render directly.",
+      implementation: "google-rest-api",
+      scopes: [],
+      input: z.object({
+        object: z.enum(["phone", "laptop", "watch"]),
+        title: z.string().default("Product teardown"),
+      }),
+      run: async (_ctx, input) => {
+        const buildPieces = EXPLODED_TEMPLATES[input.object];
+        if (!buildPieces) throw new Error(`Unknown object: ${input.object}`);
+        const pieces = buildPieces();
+        return {
+          pieces,
+          html: buildScrollSequenceHtml({ pieces, title: input.title }),
         };
       },
     }),
