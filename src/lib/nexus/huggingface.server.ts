@@ -5,9 +5,15 @@ import { NexusError } from "./errors";
  * required for hobby-scale use, unlike Vertex AI), good for smaller models
  * like facebook/musicgen-small. Rate-limited and can have cold-start delays
  * (20-60s) since it's shared infrastructure, but there is no payment wall.
+ *
+ * NOTE: Hugging Face migrated the Inference API off the old
+ * api-inference.huggingface.co domain to the new Inference Providers
+ * router. The old domain can fail with a raw Cloudflare origin DNS error
+ * (error code: 1016) instead of a normal HTTP error, which masks the real
+ * cause -- always use the router domain below.
  * https://huggingface.co/docs/api-inference
  */
-const BASE = "https://api-inference.huggingface.co/models";
+const BASE = "https://router.huggingface.co/hf-inference/models";
 
 export function huggingfaceToken(): string | undefined {
   const token = process.env["HUGGINGFACE_API_TOKEN"]?.trim();
