@@ -1,3 +1,4 @@
+import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { NexusError } from "@/lib/nexus/errors";
@@ -11,21 +12,25 @@ import { defineAdapter, defineCapability } from "@/lib/nexus/types";
  *
  * CONFIRMED BY LIVE TEST: Steel's sessionViewerUrl sends its own
  * X-Frame-Options/CSP frame-ancestors headers that refuse to render
- * inside a third-party iframe (e.g. an embedded chat widget) -- it
- * loads blank there. It only works opened directly as a top-level tab.
- * Any caller-facing text must say "open in a new tab", never "embed in
- * an iframe" -- that claim was wrong and has been removed below.
+ * inside a third-party iframe -- it loads blank there. It only works
+ * opened directly as a top-level tab.
  *
- * Unlike notebooklm-steel, sessions here are NOT bound to a persisted
- * profile by default -- each start_session is a fresh, logged-out
- * browser unless the caller explicitly passes a profileId they already
- * have (e.g. reusing the NotebookLM one deliberately).
+ * ARCHITECTURE -- CONFIRMED BY LIVE TEST (previously broken):
+ * This function runs as a stateless serverless invocation: every single
+ * tool call is a brand-new instance with empty memory. An in-memory
+ * `Map` of CDP connections (the previous implementation) CANNOT survive
+ * between calls -- not "sometimes", never, by construction. Verified
+ * live: start_session succeeded, and the very next click on the same
+ * sessionId failed instantly with session-not-found.
  *
- * Same session-cache limitation as steel-login and notebooklm-steel:
- * click/type/read reuse ONE attached CDP connection per session via
- * module-level state, which does not survive this function's Deno/Node
- * isolate being recycled between requests. If that happens mid-session,
- * the fix is simply to end_session and start_session again.
+ * Fix: session identity (the Steel session's websocketUrl) is persisted
+ * in Supabase (steel_live_sessions), and every capability call opens a
+ * FRESH CDP WebSocket connection using that stored URL, does its one
+ * command, then closes the socket. This is slightly slower per call
+ * (a new CDP handshake each time) but is the only architecture that
+ * actually works in a serverless environment -- the alternative would
+ * be a stateful edge runtime (e.g. a Durable Object), which this app
+ * does not use elsewhere.
  *
  * Requires STEEL_API_KEY as an environment variable on this app.
  */
@@ -50,17 +55,88 @@ function steelHeaders(apiKey: string): Record<string, string> {
   return { "steel-api-key": apiKey, "content-type": "application/json" };
 }
 
+function supabaseAdmin() {
+  const url = process.env["SUPABASE_URL"];
+  const serviceKey = process.env["SUPABASE_SERVICE_ROLE_KEY"];
+  if (!url || !serviceKey) {
+    throw new NexusError(
+      "steel_browser_storage_not_configured",
+      "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set to persist live-browser session state.",
+      503,
+    );
+  }
+  return createClient(url, serviceKey);
+}
+
+interface StoredSession {
+  steel_session_id: string;
+  websocket_url: string;
+  current_url: string | null;
+}
+
+async function saveSession(userId: string, steelSessionId: string, websocketUrl: string, currentUrl: string) {
+  const { error } = await supabaseAdmin().from("steel_live_sessions").insert({
+    user_id: userId,
+    steel_session_id: steelSessionId,
+    websocket_url: websocketUrl,
+    current_url: currentUrl,
+  });
+  if (error) {
+    throw new NexusError("steel_browser_storage_failed", `Failed to persist session: ${error.message}`, 500);
+  }
+}
+
+async function loadSession(userId: string, steelSessionId: string): Promise<StoredSession> {
+  const { data, error } = await supabaseAdmin()
+    .from("steel_live_sessions")
+    .select("steel_session_id, websocket_url, current_url")
+    .eq("user_id", userId)
+    .eq("steel_session_id", steelSessionId)
+    .maybeSingle();
+  if (error) {
+    throw new NexusError("steel_browser_storage_failed", `Failed to load session: ${error.message}`, 500);
+  }
+  if (!data) {
+    throw new NexusError(
+      "steel_browser_session_not_found",
+      "No stored session for this sessionId -- either it was never started here, or it already ended. Call start_session again.",
+      404,
+    );
+  }
+  return data;
+}
+
+async function touchSession(userId: string, steelSessionId: string, currentUrl?: string) {
+  const update: Record<string, unknown> = { last_used_at: new Date().toISOString() };
+  if (currentUrl) update["current_url"] = currentUrl;
+  await supabaseAdmin()
+    .from("steel_live_sessions")
+    .update(update)
+    .eq("user_id", userId)
+    .eq("steel_session_id", steelSessionId);
+}
+
+async function deleteSession(userId: string, steelSessionId: string) {
+  await supabaseAdmin()
+    .from("steel_live_sessions")
+    .delete()
+    .eq("user_id", userId)
+    .eq("steel_session_id", steelSessionId);
+}
+
 interface CdpPage {
   ws: WebSocket;
   command: (method: string, params?: Record<string, unknown>) => Promise<{ result?: Record<string, unknown> }>;
   waitForEvent: (method: string, timeoutMs: number) => Promise<void>;
+  close: () => void;
 }
 
+/** Opens a brand-new CDP connection for a single call. Caller must call page.close() when done. */
 async function attachToPage(wsUrl: string): Promise<CdpPage> {
   const ws = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
-    ws.onerror = () => reject(new Error("Failed to open CDP WebSocket to Steel session"));
+    ws.onerror = () => reject(new NexusError("steel_browser_connect_failed", "Failed to open CDP WebSocket to the Steel session -- it may have expired.", 502));
   });
 
   let nextId = 1;
@@ -103,13 +179,19 @@ async function attachToPage(wsUrl: string): Promise<CdpPage> {
   const targetInfos =
     (targetsRes.result?.["targetInfos"] as Array<{ targetId: string; type: string }>) ?? [];
   const pageTarget = targetInfos.find((t) => t.type === "page");
-  if (!pageTarget) throw new Error("No page target found on the Steel session");
+  if (!pageTarget) {
+    ws.close();
+    throw new NexusError("steel_browser_no_page", "No page target found on the Steel session.", 502);
+  }
 
   const attachRes = await waitFor(
     send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true }),
   );
   const pageSessionId = attachRes.result?.["sessionId"] as string | undefined;
-  if (!pageSessionId) throw new Error("Failed to attach to the Steel session's page target");
+  if (!pageSessionId) {
+    ws.close();
+    throw new NexusError("steel_browser_attach_failed", "Failed to attach to the Steel session's page target.", 502);
+  }
 
   const page: CdpPage = {
     ws,
@@ -124,6 +206,13 @@ async function attachToPage(wsUrl: string): Promise<CdpPage> {
         });
         eventWaiters.set(method, list);
       }),
+    close: () => {
+      try {
+        ws.close();
+      } catch {
+        // already closed -- fine
+      }
+    },
   };
 
   await page.command("Page.enable");
@@ -131,8 +220,6 @@ async function attachToPage(wsUrl: string): Promise<CdpPage> {
   await page.command("DOM.enable");
   return page;
 }
-
-const sessions = new Map<string, CdpPage>();
 
 async function evaluateJson<T>(page: CdpPage, expression: string): Promise<T> {
   const res = await page.command("Runtime.evaluate", { expression, returnByValue: true });
@@ -143,17 +230,15 @@ async function evaluateJson<T>(page: CdpPage, expression: string): Promise<T> {
   return (result?.value ?? null) as T;
 }
 
-function requireSession(sessionId: string): CdpPage {
-  const page = sessions.get(sessionId);
-  if (!page) {
-    throw new NexusError(
-      "steel_browser_session_not_found",
-      "No active session for this sessionId -- either it was never started here, or this " +
-        "function instance was recycled between requests. Call start_session again.",
-      404,
-    );
+/** Runs `fn` against a fresh CDP connection to the stored session, always closing the socket after. */
+async function withPage<T>(userId: string, steelSessionId: string, fn: (page: CdpPage) => Promise<T>): Promise<T> {
+  const stored = await loadSession(userId, steelSessionId);
+  const page = await attachToPage(stored.websocket_url);
+  try {
+    return await fn(page);
+  } finally {
+    page.close();
   }
-  return page;
 }
 
 export const steelBrowserAdapter = defineAdapter({
@@ -164,12 +249,12 @@ export const steelBrowserAdapter = defineAdapter({
     "type, and read pages in real time, not bound to any saved login.",
   status: "partial",
   statusNote:
-    "click/type/read reuse one CDP connection per session in memory -- doesn't survive this " +
-    "function's isolate being recycled between requests. If a call fails with " +
-    "steel_browser_session_not_found, just start_session again. The returned liveViewUrl only " +
-    "works opened as a top-level tab -- Steel's own frame-ancestors policy blocks it from " +
-    "rendering inside any embedded iframe, confirmed by live test. Requires STEEL_API_KEY as an " +
-    "env var on this app.",
+    "Session identity is persisted in Supabase and each call opens a fresh CDP connection -- " +
+    "this replaced a broken in-memory implementation that could never survive between calls in " +
+    "this serverless environment (confirmed by live test). Also requires SUPABASE_URL and " +
+    "SUPABASE_SERVICE_ROLE_KEY. The returned liveViewUrl only works opened as a top-level tab -- " +
+    "Steel's own frame-ancestors policy blocks it from rendering inside any embedded iframe, " +
+    "confirmed by live test. Requires STEEL_API_KEY as an env var on this app.",
   requiresGoogleAuth: false,
   docsUrl: "https://docs.steel.dev",
   capabilities: [
@@ -191,7 +276,7 @@ export const steelBrowserAdapter = defineAdapter({
           .optional()
           .describe("Reuse a previously saved Steel profile instead of starting logged-out."),
       }),
-      run: async (_ctx, input) => {
+      run: async (ctx, input) => {
         const { apiKey } = requireSteelConfig();
         const sessionRes = await fetch(`${STEEL_API}/sessions`, {
           method: "POST",
@@ -217,13 +302,14 @@ export const steelBrowserAdapter = defineAdapter({
         }
 
         const page = await attachToPage(session.websocketUrl);
-        sessions.set(session.id, page);
-        page.ws.addEventListener("close", () => {
-          if (sessions.get(session.id) === page) sessions.delete(session.id);
-        });
+        try {
+          await page.command("Page.navigate", { url: input.url });
+          await page.waitForEvent("Page.loadEventFired", PAGE_LOAD_TIMEOUT_MS);
+        } finally {
+          page.close();
+        }
 
-        await page.command("Page.navigate", { url: input.url });
-        await page.waitForEvent("Page.loadEventFired", PAGE_LOAD_TIMEOUT_MS);
+        await saveSession(ctx.userId, session.id, session.websocketUrl, input.url);
 
         return {
           sessionId: session.id,
@@ -240,10 +326,12 @@ export const steelBrowserAdapter = defineAdapter({
       scopes: [],
       mutating: true,
       input: z.object({ sessionId: z.string(), url: z.string().url() }),
-      run: async (_ctx, input) => {
-        const page = requireSession(input.sessionId);
-        await page.command("Page.navigate", { url: input.url });
-        await page.waitForEvent("Page.loadEventFired", PAGE_LOAD_TIMEOUT_MS);
+      run: async (ctx, input) => {
+        await withPage(ctx.userId, input.sessionId, async (page) => {
+          await page.command("Page.navigate", { url: input.url });
+          await page.waitForEvent("Page.loadEventFired", PAGE_LOAD_TIMEOUT_MS);
+        });
+        await touchSession(ctx.userId, input.sessionId, input.url);
         return { ok: true };
       },
     }),
@@ -258,36 +346,38 @@ export const steelBrowserAdapter = defineAdapter({
       scopes: [],
       mutating: true,
       input: z.object({ sessionId: z.string(), selector: z.string().min(1) }),
-      run: async (_ctx, input) => {
-        const page = requireSession(input.sessionId);
-        const rect = await evaluateJson<{ x: number; y: number } | null>(
-          page,
-          `(() => {
-            const el = document.querySelector(${JSON.stringify(input.selector)});
-            if (!el) return null;
-            el.scrollIntoView({ block: "center", inline: "center" });
-            const r = el.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-          })()`,
-        );
-        if (!rect) {
-          throw new NexusError("steel_browser_element_not_found", `No element matched "${input.selector}".`, 404);
-        }
-        await page.command("Input.dispatchMouseEvent", { type: "mouseMoved", x: rect.x, y: rect.y });
-        await page.command("Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          x: rect.x,
-          y: rect.y,
-          button: "left",
-          clickCount: 1,
+      run: async (ctx, input) => {
+        await withPage(ctx.userId, input.sessionId, async (page) => {
+          const rect = await evaluateJson<{ x: number; y: number } | null>(
+            page,
+            `(() => {
+              const el = document.querySelector(${JSON.stringify(input.selector)});
+              if (!el) return null;
+              el.scrollIntoView({ block: "center", inline: "center" });
+              const r = el.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            })()`,
+          );
+          if (!rect) {
+            throw new NexusError("steel_browser_element_not_found", `No element matched "${input.selector}".`, 404);
+          }
+          await page.command("Input.dispatchMouseEvent", { type: "mouseMoved", x: rect.x, y: rect.y });
+          await page.command("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            x: rect.x,
+            y: rect.y,
+            button: "left",
+            clickCount: 1,
+          });
+          await page.command("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            x: rect.x,
+            y: rect.y,
+            button: "left",
+            clickCount: 1,
+          });
         });
-        await page.command("Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x: rect.x,
-          y: rect.y,
-          button: "left",
-          clickCount: 1,
-        });
+        await touchSession(ctx.userId, input.sessionId);
         return { ok: true };
       },
     }),
@@ -301,20 +391,22 @@ export const steelBrowserAdapter = defineAdapter({
       scopes: [],
       mutating: true,
       input: z.object({ sessionId: z.string(), text: z.string(), pressEnter: z.boolean().default(false) }),
-      run: async (_ctx, input) => {
-        const page = requireSession(input.sessionId);
-        if (input.text) await page.command("Input.insertText", { text: input.text });
-        if (input.pressEnter) {
-          const enterParams = {
-            key: "Enter",
-            code: "Enter",
-            windowsVirtualKeyCode: 13,
-            nativeVirtualKeyCode: 13,
-            text: "\r",
-          };
-          await page.command("Input.dispatchKeyEvent", { type: "keyDown", ...enterParams });
-          await page.command("Input.dispatchKeyEvent", { type: "keyUp", ...enterParams });
-        }
+      run: async (ctx, input) => {
+        await withPage(ctx.userId, input.sessionId, async (page) => {
+          if (input.text) await page.command("Input.insertText", { text: input.text });
+          if (input.pressEnter) {
+            const enterParams = {
+              key: "Enter",
+              code: "Enter",
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13,
+              text: "\r",
+            };
+            await page.command("Input.dispatchKeyEvent", { type: "keyDown", ...enterParams });
+            await page.command("Input.dispatchKeyEvent", { type: "keyUp", ...enterParams });
+          }
+        });
+        await touchSession(ctx.userId, input.sessionId);
         return { ok: true };
       },
     }),
@@ -326,37 +418,32 @@ export const steelBrowserAdapter = defineAdapter({
       implementation: "browser-automation",
       scopes: [],
       input: z.object({ sessionId: z.string(), selector: z.string().optional() }),
-      run: async (_ctx, input) => {
-        const page = requireSession(input.sessionId);
-        const text = await evaluateJson<string | null>(
-          page,
-          input.selector
-            ? `document.querySelector(${JSON.stringify(input.selector)})?.innerText ?? null`
-            : `document.body.innerText`,
-        );
-        const urlValue = await evaluateJson<string>(page, "window.location.href");
-        return { url: urlValue, text };
+      run: async (ctx, input) => {
+        const result = await withPage(ctx.userId, input.sessionId, async (page) => {
+          const text = await evaluateJson<string | null>(
+            page,
+            input.selector
+              ? `document.querySelector(${JSON.stringify(input.selector)})?.innerText ?? null`
+              : `document.body.innerText`,
+          );
+          const urlValue = await evaluateJson<string>(page, "window.location.href");
+          return { url: urlValue, text };
+        });
+        await touchSession(ctx.userId, input.sessionId, result.url);
+        return result;
       },
     }),
     defineCapability({
       id: "steel_browser.end_session",
       title: "End a live browser session",
-      description: "Closes the CDP connection and releases the Steel session.",
+      description: "Closes the session and releases it on Steel.",
       implementation: "browser-automation",
       scopes: [],
       mutating: true,
       input: z.object({ sessionId: z.string() }),
-      run: async (_ctx, input) => {
+      run: async (ctx, input) => {
         const { apiKey } = requireSteelConfig();
-        const page = sessions.get(input.sessionId);
-        if (page) {
-          sessions.delete(input.sessionId);
-          try {
-            page.ws.close();
-          } catch {
-            // already closed -- fine
-          }
-        }
+        await deleteSession(ctx.userId, input.sessionId);
         await fetch(`${STEEL_API}/sessions/${input.sessionId}/release`, {
           method: "POST",
           headers: steelHeaders(apiKey),
