@@ -5,10 +5,16 @@ import { defineAdapter, defineCapability } from "@/lib/nexus/types";
 
 /**
  * General-purpose live browser sessions on Steel -- NOT tied to
- * NotebookLM or any saved login. This is what lets the user literally
- * watch this app drive a browser in real time: every capability here
- * returns (or reuses) a `liveViewUrl` you can open in a tab or embed in
- * an iframe, identical to the Live View used on /notebooks/connect.
+ * NotebookLM or any saved login. Every capability here returns (or
+ * reuses) a `liveViewUrl` for watching this app drive a browser in real
+ * time.
+ *
+ * CONFIRMED BY LIVE TEST: Steel's sessionViewerUrl sends its own
+ * X-Frame-Options/CSP frame-ancestors headers that refuse to render
+ * inside a third-party iframe (e.g. an embedded chat widget) -- it
+ * loads blank there. It only works opened directly as a top-level tab.
+ * Any caller-facing text must say "open in a new tab", never "embed in
+ * an iframe" -- that claim was wrong and has been removed below.
  *
  * Unlike notebooklm-steel, sessions here are NOT bound to a persisted
  * profile by default -- each start_session is a fresh, logged-out
@@ -160,7 +166,9 @@ export const steelBrowserAdapter = defineAdapter({
   statusNote:
     "click/type/read reuse one CDP connection per session in memory -- doesn't survive this " +
     "function's isolate being recycled between requests. If a call fails with " +
-    "steel_browser_session_not_found, just start_session again. Requires STEEL_API_KEY as an " +
+    "steel_browser_session_not_found, just start_session again. The returned liveViewUrl only " +
+    "works opened as a top-level tab -- Steel's own frame-ancestors policy blocks it from " +
+    "rendering inside any embedded iframe, confirmed by live test. Requires STEEL_API_KEY as an " +
     "env var on this app.",
   requiresGoogleAuth: false,
   docsUrl: "https://docs.steel.dev",
@@ -169,8 +177,10 @@ export const steelBrowserAdapter = defineAdapter({
       id: "steel_browser.start_session",
       title: "Start a live browser session",
       description:
-        "Opens a real browser session and navigates to a URL. Returns a liveViewUrl -- open it in " +
-        "a tab or embed it in an iframe to watch every action happen in real time.",
+        "Opens a real browser session and navigates to a URL. Returns a liveViewUrl -- open it " +
+        "directly in its own browser tab to watch every action happen in real time. It cannot be " +
+        "embedded in an iframe: Steel's own frame-ancestors policy blocks that and it will render " +
+        "blank, confirmed by live test.",
       implementation: "browser-automation",
       scopes: [],
       mutating: true,
@@ -215,7 +225,11 @@ export const steelBrowserAdapter = defineAdapter({
         await page.command("Page.navigate", { url: input.url });
         await page.waitForEvent("Page.loadEventFired", PAGE_LOAD_TIMEOUT_MS);
 
-        return { sessionId: session.id, liveViewUrl: session.sessionViewerUrl };
+        return {
+          sessionId: session.id,
+          liveViewUrl: session.sessionViewerUrl,
+          liveViewNote: "Open this URL in its own browser tab. It will not render inside an embedded iframe.",
+        };
       },
     }),
     defineCapability({
