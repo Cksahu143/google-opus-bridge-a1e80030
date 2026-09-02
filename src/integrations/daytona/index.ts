@@ -3,9 +3,11 @@ import { z } from "zod";
 import {
   createSandbox,
   deleteSandbox,
+  downloadFile,
   execCommand,
   listSandboxes,
   runCode,
+  uploadFile,
 } from "@/lib/nexus/daytona.server";
 import { defineAdapter, defineCapability } from "@/lib/nexus/types";
 
@@ -27,7 +29,7 @@ export const daytonaAdapter = defineAdapter({
   service: "daytona",
   label: "Daytona",
   description:
-    "Real, persistent Docker sandboxes with terminal command execution — a genuine computer per task, in your own account.",
+    "Real, persistent Docker sandboxes with a terminal, file upload/download, and code execution — a genuine testing VM per task, in your own account.",
   status: "requires-configuration",
   statusNote:
     "Needs DAYTONA_API_KEY as an environment secret (create one at app.daytona.io). Free tier available; sandboxes are visible and deletable from your own Daytona dashboard at any time — this never runs unattended.",
@@ -101,6 +103,47 @@ export const daytonaAdapter = defineAdapter({
         code: z.string().min(1),
       }),
       run: (_ctx, input) => runCode({ sandboxId: input.sandboxId, code: input.code }),
+    }),
+    defineCapability({
+      id: "daytona.upload_file",
+      title: "Upload a file into a sandbox",
+      description:
+        "Uploads a file (base64-encoded content) into a sandbox at the given path — the piece needed to get a .zip (or any file) into the sandbox before running 'unzip' or any other command against it via daytona.exec.",
+      implementation: "google-rest-api",
+      scopes: [],
+      mutating: true,
+      input: z.object({
+        sandboxId: z.string().min(1),
+        path: z
+          .string()
+          .min(1)
+          .describe("Destination path inside the sandbox, e.g. '/home/daytona/upload.zip'"),
+        contentBase64: z.string().min(1),
+      }),
+      run: async (_ctx, input) => {
+        await uploadFile({
+          sandboxId: input.sandboxId,
+          path: input.path,
+          contentBase64: input.contentBase64,
+        });
+        return { uploaded: input.path };
+      },
+    }),
+    defineCapability({
+      id: "daytona.download_file",
+      title: "Download a file from a sandbox",
+      description:
+        "Downloads a file's contents from a sandbox, base64-encoded — for pulling back results after running something.",
+      implementation: "google-rest-api",
+      scopes: [],
+      input: z.object({
+        sandboxId: z.string().min(1),
+        path: z.string().min(1),
+      }),
+      run: async (_ctx, input) => ({
+        path: input.path,
+        contentBase64: await downloadFile({ sandboxId: input.sandboxId, path: input.path }),
+      }),
     }),
     defineCapability({
       id: "daytona.delete_sandbox",
