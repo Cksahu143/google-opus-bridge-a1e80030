@@ -7,39 +7,9 @@ import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 import { runNexusCapability } from "@/lib/nexus/nexus.functions";
 
-// The actual browser doing the Google/NotebookLM login runs on
-// Browserbase's managed infrastructure, embedded here via an <iframe>
-// pointed at their Live View URL -- this is Browserbase's own documented
-// pattern ("add the live view link to an iframe in your frontend to
-// embed it"), not a new-tab popup.
-//
-// A previous version of this page briefly switched to window.open() in a
-// new tab instead, reasoning it'd be less cramped. That introduced a
-// worse bug: opening a new tab backgrounds this original tab, and
-// iOS/iPadOS Safari is known to let a *backgrounded* tab's input show a
-// blinking caret (DOM focus succeeds) while withholding the actual
-// on-screen keyboard, since iOS only raises the keyboard for the
-// frontmost webview. That matched exactly what got reported: cursor
-// appears, keyboard never does, only on this page, only after the popup
-// opened -- and only fixable by staying in one tab. Reverted to the
-// iframe embed, which keeps this page and the login both in the same
-// frontmost context.
-//
-// IMPORTANT: whether embedded via iframe or a new tab, the Live View is
-// still a screencast/canvas stream of a remote browser, not the actual
-// page's real DOM loaded locally -- there is no local input element for
-// iOS/iPadOS Safari to attach a keyboard to *inside* it either way. This
-// is why the "type into browser" box below still exists: typing there
-// and tapping Send forwards the text into whatever field is currently
-// focused in the live view via the backend's CDP bridge
-// (Input.insertText), the same mechanism Chrome uses for IME/emoji
-// keyboard input. Tap the field inside the embedded window first to
-// focus it, same as any login form, then type in the box below it.
-//
-// KNOWN LIMITATION: only one login session can be in progress at a time
-// per user (Browserbase's free tier also caps sessions at 15 minutes and
-// ~1 browser-hour/month total -- fine for occasional logins, not for
-// anything continuous).
+// Steel's current headful Live View uses WebRTC. The embedded debug URL is
+// interactive when interactive=true; sessionViewerUrl is only the dashboard
+// viewer and must not be used for the login iframe.
 
 export const Route = createFileRoute("/notebooks/connect")({
   ssr: false,
@@ -56,11 +26,6 @@ export const Route = createFileRoute("/notebooks/connect")({
   component: ConnectNotebookLmPage,
 });
 
-// Base URL for this project's Supabase Edge Functions. All of /start,
-// /type, /complete, /disconnect and /status go through steel-login,
-// authenticated with the signed-in user's own JWT (see authHeader()).
-// Derived from the project's Supabase URL so there is no extra env var to
-// forget (VITE_SUPABASE_FUNCTIONS_URL still wins if it's set explicitly).
 const SUPABASE_FUNCTIONS_URL =
   (import.meta.env["VITE_SUPABASE_FUNCTIONS_URL"] as string | undefined) ??
   `${(import.meta.env["VITE_SUPABASE_URL"] as string | undefined) ?? ""}/functions/v1`;
@@ -75,14 +40,18 @@ type ConnectState =
   | { step: "disconnecting" }
   | { step: "error"; message: string };
 
+function makeInteractiveLiveViewUrl(value: string): string {
+  const url = new URL(value, window.location.origin);
+  url.searchParams.set("interactive", "true");
+  url.searchParams.set("showControls", "true");
+  return url.toString();
+}
+
 function ConnectNotebookLmPage() {
   const [state, setState] = useState<ConnectState>({ step: "checking" });
   const [userId, setUserId] = useState<string | null>(null);
   const callCapability = useServerFn(runNexusCapability);
 
-  // Actually exercises the notebooklm_steel adapter registered on
-  // top of this login, instead of just claiming "Claude can use this now"
-  // with no way to verify it from the page itself.
   const [toolState, setToolState] = useState<
     | { kind: "idle" }
     | { kind: "running"; tool: "health" | "list" }
@@ -103,9 +72,6 @@ function ConnectNotebookLmPage() {
     }
   }
 
-  // Track the in-flight sessionId only so an unmount mid-login doesn't
-  // leave a dangling reference client-side. Browserbase sessions expire on
-  // their own (15 min on the free tier) -- there's no cancel call to make.
   const sessionIdRef = useRef<string | null>(null);
 
   async function authHeader(): Promise<Record<string, string>> {
@@ -126,8 +92,6 @@ function ConnectNotebookLmPage() {
           : { step: "idle" },
       );
     } catch (err) {
-      // Not fatal -- just fall back to showing the connect button rather
-      // than blocking the page on a status-check failure.
       setState({ step: "idle" });
       console.error("Failed to check NotebookLM connection status:", err);
     }
@@ -141,12 +105,6 @@ function ConnectNotebookLmPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Explicit lock, separate from React state: a synchronous ref actually
-  // blocks a rapid double-tap before React re-renders the button as
-  // disabled, unlike setState -- confirmed necessary via Supabase logs
-  // earlier showing two /start calls fire under 1 second apart from a
-  // single interaction, each burning one of only 3 free-tier concurrent
-  // session slots.
   const startInFlightRef = useRef(false);
 
   async function startConnect() {
@@ -167,18 +125,20 @@ function ConnectNotebookLmPage() {
       if (!res.ok) throw new Error(await res.text());
       const { sessionId, liveViewUrl } = await res.json();
       if (!liveViewUrl || typeof liveViewUrl !== "string") {
-        // This is the actual "about:blank" bug from earlier: setting
-        // liveViewUrl into state even if it came back empty/undefined
-        // means <iframe src={undefined}> silently renders about:blank
-        // with no visible error at all. Fail loudly instead.
         throw new Error(
           "Steel did not return a live view URL. Check that STEEL_API_KEY is set as a secret on " +
             "the steel-login Edge Function specifically (Supabase dashboard → Edge Functions → " +
-            "steel-login → Secrets) — a Lovable frontend env var alone is not visible to this function.",
+            "steel-login → Secrets).",
         );
       }
       sessionIdRef.current = sessionId;
-      setState({ step: "awaiting-login", sessionId, liveViewUrl });
+      // Enforce interactive mode here as well as in the backend so a stale
+      // or cached URL can never put the embedded viewer into read-only mode.
+      setState({
+        step: "awaiting-login",
+        sessionId,
+        liveViewUrl: makeInteractiveLiveViewUrl(liveViewUrl),
+      });
     } catch (err) {
       setState({ step: "error", message: String((err as Error)?.message ?? err) });
     } finally {
@@ -186,17 +146,8 @@ function ConnectNotebookLmPage() {
     }
   }
 
-  // Local "type into browser" box state -- see the file header comment on
-  // why this exists (there's no local input inside the live view for iOS
-  // to attach a keyboard to).
   const [typeValue, setTypeValue] = useState("");
   const [typing, setTyping] = useState(false);
-  // Synchronous ref lock, not just the `typing` state: a fast double-tap
-  // on "Send" can fire twice before React re-renders the button as
-  // disabled (setState is async/batched). Two concurrent /type calls means
-  // two simultaneous CDP WebSocket connections to the same session, which
-  // is exactly what caused "WebSocket disconnected" mid-login before the
-  // backend started closing each /type connection after use.
   const typingInFlightRef = useRef(false);
 
   async function sendTypedText(pressEnter: boolean) {
@@ -272,43 +223,31 @@ function ConnectNotebookLmPage() {
       {state.step === "checking" && (
         <p className="text-sm text-muted-foreground">Checking connection status…</p>
       )}
-
       {state.step === "idle" && (
-        <Button onClick={startConnect} disabled={!userId}>
-          Connect NotebookLM
-        </Button>
+        <Button onClick={startConnect} disabled={!userId}>Connect NotebookLM</Button>
       )}
-
       {state.step === "starting" && (
         <p className="text-sm text-muted-foreground">Starting a secure login session…</p>
       )}
 
       {state.step === "awaiting-login" && (
         <div className="space-y-4">
-          <div
-            className="overflow-hidden rounded-lg border border-border"
-            style={{ aspectRatio: "16 / 10" }}
-          >
-            {/* Real, live browser session running on Browserbase's
-                infrastructure -- not a screenshot. Tap fields to focus
-                them, then use the box below to actually type on iPad/iPhone
-                (see the note underneath). Deliberately NOT window.open()'d
-                into a new tab -- see file header comment for why that broke
-                the iOS keyboard entirely. */}
+          <div className="overflow-hidden rounded-lg border border-border" style={{ aspectRatio: "16 / 10" }}>
             <iframe
               src={state.liveViewUrl}
               title="NotebookLM login"
               className="h-full w-full"
-              allow="clipboard-write"
-              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+              // Match Steel's documented Live View embedding. No sandbox:
+              // the current headful WebRTC viewer needs normal iframe behavior.
+              allow="clipboard-write; autoplay; fullscreen"
+              allowFullScreen
             />
           </div>
 
           <div className="space-y-2 rounded-lg border border-border p-3">
             <p className="text-xs font-medium text-muted-foreground">
-              Can&apos;t type in the window above? (Common on iPad/iPhone -- the live view is a
-              screencast, not a real page, so iOS won&apos;t show a keyboard for it.) Tap the field
-              you want to fill in the login window first to focus it, then type it here instead:
+              If your device&apos;s keyboard does not appear for the embedded browser, tap the field
+              you want to fill in the login window first, then type it here instead:
             </p>
             <div className="flex gap-2">
               <Input
@@ -367,7 +306,6 @@ function ConnectNotebookLmPage() {
             NotebookLM connected
             {state.connectedAt ? ` — since ${new Date(state.connectedAt).toLocaleString()}` : ""}.
           </p>
-
           <div className="space-y-2 rounded-lg border border-border p-3">
             <p className="text-xs font-medium text-muted-foreground">
               Try the actual tools Claude uses against this login:
@@ -379,9 +317,7 @@ function ConnectNotebookLmPage() {
                 onClick={() => void runTool("health")}
                 disabled={toolState.kind === "running"}
               >
-                {toolState.kind === "running" && toolState.tool === "health"
-                  ? "Checking…"
-                  : "Check login is still valid"}
+                {toolState.kind === "running" && toolState.tool === "health" ? "Checking…" : "Check login is still valid"}
               </Button>
               <Button
                 type="button"
@@ -390,38 +326,27 @@ function ConnectNotebookLmPage() {
                 onClick={() => void runTool("list")}
                 disabled={toolState.kind === "running"}
               >
-                {toolState.kind === "running" && toolState.tool === "list"
-                  ? "Loading…"
-                  : "List my real notebooks"}
+                {toolState.kind === "running" && toolState.tool === "list" ? "Loading…" : "List my real notebooks"}
               </Button>
             </div>
-
             {toolState.kind === "result" && (
               <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted p-2 text-xs">
                 {JSON.stringify(toolState.data, null, 2)}
               </pre>
             )}
             {toolState.kind === "tool-error" && (
-              <p role="alert" className="text-xs text-destructive">
-                {toolState.message}
-              </p>
+              <p role="alert" className="text-xs text-destructive">{toolState.message}</p>
             )}
           </div>
-
-          <Button type="button" variant="outline" onClick={disconnect}>
-            Disconnect NotebookLM
-          </Button>
+          <Button type="button" variant="outline" onClick={disconnect}>Disconnect NotebookLM</Button>
         </div>
       )}
 
       {state.step === "disconnecting" && (
         <p className="text-sm text-muted-foreground">Disconnecting…</p>
       )}
-
       {state.step === "error" && (
-        <p role="alert" className="text-sm text-destructive">
-          {state.message}
-        </p>
+        <p role="alert" className="text-sm text-destructive">{state.message}</p>
       )}
     </main>
   );
