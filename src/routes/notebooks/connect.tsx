@@ -3,13 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 import { runNexusCapability } from "@/lib/nexus/nexus.functions";
 
-// Steel's current headful Live View uses WebRTC. The embedded debug URL is
-// interactive when interactive=true; sessionViewerUrl is only the dashboard
-// viewer and must not be used for the login iframe.
+// Google OAuth cannot run inside an embedded user-agent/iframe. Steel's
+// interactive debug URL is still used, but the Google login must open in a
+// normal top-level browser tab/window.
 
 export const Route = createFileRoute("/notebooks/connect")({
   ssr: false,
@@ -132,8 +131,6 @@ function ConnectNotebookLmPage() {
         );
       }
       sessionIdRef.current = sessionId;
-      // Enforce interactive mode here as well as in the backend so a stale
-      // or cached URL can never put the embedded viewer into read-only mode.
       setState({
         step: "awaiting-login",
         sessionId,
@@ -143,33 +140,6 @@ function ConnectNotebookLmPage() {
       setState({ step: "error", message: String((err as Error)?.message ?? err) });
     } finally {
       startInFlightRef.current = false;
-    }
-  }
-
-  const [typeValue, setTypeValue] = useState("");
-  const [typing, setTyping] = useState(false);
-  const typingInFlightRef = useRef(false);
-
-  async function sendTypedText(pressEnter: boolean) {
-    if (state.step !== "awaiting-login") return;
-    if (!typeValue && !pressEnter) return;
-    if (typingInFlightRef.current) return;
-    typingInFlightRef.current = true;
-    setTyping(true);
-    try {
-      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/type`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ sessionId: state.sessionId, text: typeValue, pressEnter }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setTypeValue("");
-    } catch (err) {
-      setState({ step: "error", message: String((err as Error)?.message ?? err) });
-    } finally {
-      setTyping(false);
-      typingInFlightRef.current = false;
     }
   }
 
@@ -215,8 +185,8 @@ function ConnectNotebookLmPage() {
           Connect NotebookLM
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          This connects your real NotebookLM account (not the separate Nexus-managed notebooks used
-          elsewhere in this app). You&apos;ll log into Google in the embedded window below.
+          This connects your real NotebookLM account. Google sign-in opens in a normal browser
+          window because Google blocks OAuth login inside embedded browsers.
         </p>
       </div>
 
@@ -232,63 +202,26 @@ function ConnectNotebookLmPage() {
 
       {state.step === "awaiting-login" && (
         <div className="space-y-4">
-          <div className="overflow-hidden rounded-lg border border-border" style={{ aspectRatio: "16 / 10" }}>
-            <iframe
-              src={state.liveViewUrl}
-              title="NotebookLM login"
-              className="h-full w-full"
-              // Match Steel's documented Live View embedding. No sandbox:
-              // the current headful WebRTC viewer needs normal iframe behavior.
-              allow="clipboard-write; autoplay; fullscreen"
-              allowFullScreen
-            />
-          </div>
-
-          <div className="space-y-2 rounded-lg border border-border p-3">
-            <p className="text-xs font-medium text-muted-foreground">
-              If your device&apos;s keyboard does not appear for the embedded browser, tap the field
-              you want to fill in the login window first, then type it here instead:
-            </p>
-            <div className="flex gap-2">
-              <Input
-                type="text"
-                inputMode="email"
-                autoCapitalize="none"
-                autoCorrect="off"
-                placeholder="Type your email or password here…"
-                value={typeValue}
-                onChange={(e) => setTypeValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void sendTypedText(true);
-                  }
-                }}
-                disabled={typing}
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => void sendTypedText(false)}
-                disabled={typing || !typeValue}
-              >
-                Send
-              </Button>
+          <div className="rounded-lg border border-border p-5 space-y-4">
+            <div>
+              <p className="text-sm font-medium text-foreground">Secure Google login</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Google does not allow account sign-in from an embedded iframe. Open the Steel
+                browser in a normal browser tab, complete the login there, then return here.
+              </p>
             </div>
             <Button
               type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void sendTypedText(true)}
-              disabled={typing}
+              onClick={() => window.open(state.liveViewUrl, "steel-notebooklm-login", "popup,width=1200,height=800")}
             >
-              Press Enter / Next
+              Open secure login
             </Button>
           </div>
 
           <p className="text-sm text-muted-foreground">
-            Log into your Google account above. Once you see your NotebookLM notebooks load inside
-            the window, tap the button below.
+            After the Steel browser shows your NotebookLM notebooks, return to this page and tap
+            the button below. Your Google password is entered only in Google&apos;s browser page,
+            not into this app.
           </p>
           <Button type="button" onClick={() => finishConnect(state.sessionId)}>
             I&apos;m done logging in
