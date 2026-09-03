@@ -6,3 +6,8 @@ project_id = "bjamfhlopmawtnzwwicu"
 # header) isn't rejected before the function ever runs.
 [functions.steel-login]
 verify_jwt = false
+
+# The proxy also verifies the Supabase JWT itself so it can handle CORS
+# preflight before authentication and keep the upstream service token private.
+[functions.notebooklm-proxy]
+verify_jwt = false
