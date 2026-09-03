@@ -1,14 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
-import { useServerFn } from "@tanstack/react-start";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
-import { runNexusCapability } from "@/lib/nexus/nexus.functions";
-
-// Google OAuth cannot run inside an embedded user-agent/iframe. Steel's
-// interactive debug URL is still used, but the Google login must open in a
-// normal top-level browser tab/window.
 
 export const Route = createFileRoute("/notebooks/connect")({
   ssr: false,
@@ -17,8 +11,7 @@ export const Route = createFileRoute("/notebooks/connect")({
       { title: "Connect NotebookLM · Google Nexus" },
       {
         name: "description",
-        content:
-          "Connect your real NotebookLM account so Claude can create and manage real notebooks.",
+        content: "Connect Google Nexus to the real NotebookLM service running on your trusted machine.",
       },
     ],
   }),
@@ -29,220 +22,124 @@ const SUPABASE_FUNCTIONS_URL =
   (import.meta.env["VITE_SUPABASE_FUNCTIONS_URL"] as string | undefined) ??
   `${(import.meta.env["VITE_SUPABASE_URL"] as string | undefined) ?? ""}/functions/v1`;
 
-type ConnectState =
+type State =
   | { step: "checking" }
-  | { step: "idle" }
-  | { step: "starting" }
-  | { step: "awaiting-login"; sessionId: string; liveViewUrl: string }
-  | { step: "completing"; sessionId: string }
-  | { step: "connected"; connectedAt: string | null }
-  | { step: "disconnecting" }
-  | { step: "error"; message: string };
+  | { step: "offline"; message?: string }
+  | { step: "connected" };
 
-function makeInteractiveLiveViewUrl(value: string): string {
-  const url = new URL(value, window.location.origin);
-  url.searchParams.set("interactive", "true");
-  url.searchParams.set("showControls", "true");
-  return url.toString();
-}
+type ToolState =
+  | { kind: "idle" }
+  | { kind: "running"; tool: "health" | "list" }
+  | { kind: "result"; tool: "health" | "list"; data: unknown }
+  | { kind: "error"; tool: "health" | "list"; message: string };
 
 function ConnectNotebookLmPage() {
-  const [state, setState] = useState<ConnectState>({ step: "checking" });
+  const [state, setState] = useState<State>({ step: "checking" });
   const [userId, setUserId] = useState<string | null>(null);
-  const callCapability = useServerFn(runNexusCapability);
+  const [toolState, setToolState] = useState<ToolState>({ kind: "idle" });
 
-  const [toolState, setToolState] = useState<
-    | { kind: "idle" }
-    | { kind: "running"; tool: "health" | "list" }
-    | { kind: "result"; tool: "health" | "list"; data: unknown }
-    | { kind: "tool-error"; tool: "health" | "list"; message: string }
-  >({ kind: "idle" });
-
-  async function runTool(tool: "health" | "list") {
-    setToolState({ kind: "running", tool });
-    const capabilityId =
-      tool === "health" ? "notebooklm_steel.get_health" : "notebooklm_steel.list_notebooks";
-    try {
-      const result = await callCapability({ data: { capabilityId, input: {} } });
-      if (!result.ok) throw new Error(result.error ?? "Request failed");
-      setToolState({ kind: "result", tool, data: JSON.parse(result.resultJson as string) });
-    } catch (err) {
-      setToolState({ kind: "tool-error", tool, message: String((err as Error)?.message ?? err) });
-    }
-  }
-
-  const sessionIdRef = useRef<string | null>(null);
-
-  async function authHeader(): Promise<Record<string, string>> {
+  async function authHeaders(json = false): Promise<Record<string, string>> {
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    return {
+      ...(json ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
   }
 
-  async function checkStatus() {
+  async function checkService() {
     try {
-      const headers = await authHeader();
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/status`, { headers });
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as { status: string; connected_at: string | null };
-      setState(
-        data.status === "connected"
-          ? { step: "connected", connectedAt: data.connected_at }
-          : { step: "idle" },
-      );
+      const headers = await authHeaders();
+      if (!headers.Authorization) {
+        setState({ step: "offline", message: "Sign in to Google Nexus first." });
+        return;
+      }
+
+      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/notebooklm-proxy/health`, { headers });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || data.ok !== true) {
+        setState({
+          step: "offline",
+          message:
+            data.error ??
+            "The NotebookLM service is not reachable. Start notebooklm-server on the trusted machine and check its secure network endpoint.",
+        });
+        return;
+      }
+      setState({ step: "connected" });
     } catch (err) {
-      setState({ step: "idle" });
-      console.error("Failed to check NotebookLM connection status:", err);
+      setState({ step: "offline", message: String((err as Error)?.message ?? err) });
     }
   }
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
+    void supabase.auth.getUser().then(({ data }) => {
       setUserId(data.user?.id ?? null);
-      void checkStatus();
+      void checkService();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startInFlightRef = useRef(false);
-
-  async function startConnect() {
-    if (startInFlightRef.current) return;
-    startInFlightRef.current = true;
-    if (!userId) {
-      setState({ step: "error", message: "You must be signed in to connect NotebookLM." });
-      startInFlightRef.current = false;
-      return;
-    }
-    setState({ step: "starting" });
+  async function runTool(tool: "health" | "list") {
+    setToolState({ kind: "running", tool });
     try {
-      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/start`, {
-        method: "POST",
-        headers,
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const { sessionId, liveViewUrl } = await res.json();
-      if (!liveViewUrl || typeof liveViewUrl !== "string") {
-        throw new Error(
-          "Steel did not return a live view URL. Check that STEEL_API_KEY is set as a secret on " +
-            "the steel-login Edge Function specifically (Supabase dashboard → Edge Functions → " +
-            "steel-login → Secrets).",
-        );
-      }
-      sessionIdRef.current = sessionId;
-      setState({
-        step: "awaiting-login",
-        sessionId,
-        liveViewUrl: makeInteractiveLiveViewUrl(liveViewUrl),
-      });
+      const headers = await authHeaders();
+      if (!headers.Authorization) throw new Error("You must be signed in.");
+
+      const endpoint =
+        tool === "health"
+          ? `${SUPABASE_FUNCTIONS_URL}/notebooklm-proxy/health`
+          : `${SUPABASE_FUNCTIONS_URL}/notebooklm-proxy/v1/notebooks`;
+      const res = await fetch(endpoint, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : `Request failed (${res.status})`);
+      setToolState({ kind: "result", tool, data });
     } catch (err) {
-      setState({ step: "error", message: String((err as Error)?.message ?? err) });
-    } finally {
-      startInFlightRef.current = false;
+      setToolState({ kind: "error", tool, message: String((err as Error)?.message ?? err) });
     }
   }
 
-  async function finishConnect(sessionId: string) {
-    setState({ step: "completing", sessionId });
-    try {
-      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/complete`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ sessionId }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      sessionIdRef.current = null;
-      setState({ step: "connected", connectedAt: new Date().toISOString() });
-    } catch (err) {
-      setState({ step: "error", message: String((err as Error)?.message ?? err) });
-    }
-  }
-
-  async function disconnect() {
-    setState({ step: "disconnecting" });
-    try {
-      const headers = { "Content-Type": "application/json", ...(await authHeader()) };
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/steel-login/disconnect`, {
-        method: "POST",
-        headers,
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setState({ step: "idle" });
-    } catch (err) {
-      setState({ step: "error", message: String((err as Error)?.message ?? err) });
-    }
-  }
+  const connected = state.step === "connected";
 
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col gap-6 px-4 py-16">
       <div>
-        <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">
-          Google Nexus
-        </p>
-        <h1 className="mt-3 text-2xl font-semibold tracking-tight text-foreground">
-          Connect NotebookLM
-        </h1>
+        <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">Google Nexus</p>
+        <h1 className="mt-3 text-2xl font-semibold tracking-tight text-foreground">Connect NotebookLM</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          This connects your real NotebookLM account. Google sign-in opens in a normal browser
-          window because Google blocks OAuth login inside embedded browsers.
+          Nexus now talks to the real notebooklm-py service instead of trying to perform Google login inside Steel.
+          Your Google session cookies remain on the machine running notebooklm-server.
         </p>
       </div>
 
-      {state.step === "checking" && (
-        <p className="text-sm text-muted-foreground">Checking connection status…</p>
-      )}
-      {state.step === "idle" && (
-        <Button onClick={startConnect} disabled={!userId}>Connect NotebookLM</Button>
-      )}
-      {state.step === "starting" && (
-        <p className="text-sm text-muted-foreground">Starting a secure login session…</p>
-      )}
+      {state.step === "checking" && <p className="text-sm text-muted-foreground">Checking NotebookLM service…</p>}
 
-      {state.step === "awaiting-login" && (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-border p-5 space-y-4">
-            <div>
-              <p className="text-sm font-medium text-foreground">Secure Google login</p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Google does not allow account sign-in from an embedded iframe. Open the Steel
-                browser in a normal browser tab, complete the login there, then return here.
-              </p>
-            </div>
-            <Button
-              type="button"
-              onClick={() => window.open(state.liveViewUrl, "steel-notebooklm-login", "popup,width=1200,height=800")}
-            >
-              Open secure login
-            </Button>
+      {state.step === "offline" && (
+        <div className="space-y-4 rounded-lg border border-border p-5">
+          <div>
+            <p className="text-sm font-medium text-foreground">NotebookLM service is offline</p>
+            <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
           </div>
-
-          <p className="text-sm text-muted-foreground">
-            After the Steel browser shows your NotebookLM notebooks, return to this page and tap
-            the button below. Your Google password is entered only in Google&apos;s browser page,
-            not into this app.
-          </p>
-          <Button type="button" onClick={() => finishConnect(state.sessionId)}>
-            I&apos;m done logging in
-          </Button>
+          <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">On the trusted machine</p>
+            <p className="mt-1">Start notebooklm-server with NOTEBOOKLM_SERVER_TOKEN set, then expose it only through your secure private HTTPS/reverse-proxy path.</p>
+            <p className="mt-2">If the Google session has expired, run <code>notebooklm login</code> there. Do not put Google passwords or storage_state.json into Nexus.</p>
+          </div>
+          <Button type="button" onClick={() => void checkService()} disabled={!userId}>Check again</Button>
         </div>
       )}
 
-      {state.step === "completing" && (
-        <p className="text-sm text-muted-foreground">Saving your connection securely…</p>
-      )}
-
-      {state.step === "connected" && (
+      {connected && (
         <div className="space-y-4">
-          <p className="text-sm text-foreground">
-            NotebookLM connected
-            {state.connectedAt ? ` — since ${new Date(state.connectedAt).toLocaleString()}` : ""}.
-          </p>
-          <div className="space-y-2 rounded-lg border border-border p-3">
-            <p className="text-xs font-medium text-muted-foreground">
-              Try the actual tools Claude uses against this login:
+          <div className="rounded-lg border border-border p-5">
+            <p className="text-sm font-medium text-foreground">NotebookLM service connected</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Requests are authenticated by Nexus and forwarded server-to-server. The browser never receives the NotebookLM service token.
             </p>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-border p-4">
+            <p className="text-xs font-medium text-muted-foreground">Test the real NotebookLM service</p>
             <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
@@ -250,7 +147,7 @@ function ConnectNotebookLmPage() {
                 onClick={() => void runTool("health")}
                 disabled={toolState.kind === "running"}
               >
-                {toolState.kind === "running" && toolState.tool === "health" ? "Checking…" : "Check login is still valid"}
+                {toolState.kind === "running" && toolState.tool === "health" ? "Checking…" : "Check service"}
               </Button>
               <Button
                 type="button"
@@ -263,23 +160,11 @@ function ConnectNotebookLmPage() {
               </Button>
             </div>
             {toolState.kind === "result" && (
-              <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted p-2 text-xs">
-                {JSON.stringify(toolState.data, null, 2)}
-              </pre>
+              <pre className="max-h-72 overflow-auto rounded bg-muted p-3 text-xs">{JSON.stringify(toolState.data, null, 2)}</pre>
             )}
-            {toolState.kind === "tool-error" && (
-              <p role="alert" className="text-xs text-destructive">{toolState.message}</p>
-            )}
+            {toolState.kind === "error" && <p role="alert" className="text-xs text-destructive">{toolState.message}</p>}
           </div>
-          <Button type="button" variant="outline" onClick={disconnect}>Disconnect NotebookLM</Button>
         </div>
-      )}
-
-      {state.step === "disconnecting" && (
-        <p className="text-sm text-muted-foreground">Disconnecting…</p>
-      )}
-      {state.step === "error" && (
-        <p role="alert" className="text-sm text-destructive">{state.message}</p>
       )}
     </main>
   );
