@@ -1,58 +1,7 @@
 // supabase/functions/steel-login/index.ts
 //
-// Replaces browserbase-login as the backend for /notebooks/connect, per
-// user-reported slowness and disconnects with Browserbase. Independently
-// verified against Steel's own docs (not assumed): sub-second same-region
-// session start, and a free tier of 100 browser hours/month with no card.
-//
-// PERSISTENCE MECHANISM -- corrected from the first version of this file.
-// That version guessed at a `/sessions/{id}/export` endpoint returning a
-// raw cookie/state blob, stored via Supabase Vault, and flagged that guess
-// explicitly as unverified. Checked against Steel's actual docs before
-// deploying: there is no such endpoint. The real, documented mechanism is
-// the Profiles API -- create a session with `persistProfile: true` to get
-// back a `profileId`, then pass that same `profileId` (plus
-// `persistProfile: true` again, to keep layering state) into future
-// sessions to resume as that logged-in user. Steel persists the actual
-// cookies/storage on ITS side, the same trust model Browserbase's Context
-// object used -- this app only ever stores the opaque profileId, never
-// real session data. That also means Vault is no longer needed for this
-// flow at all: the profileId is stored in the existing browserbase_contexts
-// table (already RLS'd for exactly this shape: user_id + purpose +
-// context_id), just under purpose 'notebooklm_steel' instead of
-// 'notebooklm', so both backends can coexist without collision.
-//
-// KNOWN RISK, carried over deliberately: /type reuses ONE attached CDP
-// connection per session via module-level cache rather than
-// attaching/detaching per call, because repeated Target.attachToTarget
-// cycles on a watched target visibly disrupted Browserbase's Live View
-// (confirmed the hard way earlier tonight). This cache does NOT survive a
-// cold start -- if this function's Deno isolate gets recycled between
-// /start and a later /type call (a real possibility if the user takes a
-// while to react), /type will fail with "No active session found" and the
-// user has to restart the login. There is no serverless-safe way to
-// guarantee a warm isolate; this is a real, known limitation, not a bug
-// being silently ignored.
-//
-// Everything else mirrors browserbase-login's structure:
-//   - /start creates (or resumes, via profileId) a session, navigates it
-//     to NotebookLM, returns sessionViewerUrl for the frontend iframe.
-//     Immediately saves the returned profileId, regardless of whether the
-//     user finishes logging in -- harmless if the profile ends up
-//     unauthenticated, it just gets reused and built on next attempt.
-//   - /type forwards locally-typed text into the remote page's focused
-//     field via CDP Input.insertText -- iOS/iPadOS Safari won't raise a
-//     keyboard for an element inside a screencast iframe, so the "type
-//     into browser" box on the frontend exists regardless of which
-//     backend is behind it.
-//   - /complete just releases the session and marks notebooklm_connections
-//     connected -- no export step needed, the profile already has
-//     whatever the user logged into by this point.
-//   - /disconnect removes the saved profileId reference and marks
-//     notebooklm_connections disconnected.
-//   - /status reports connection state from notebooklm_connections (same
-//     table browserbase-login used -- this is purely a different login
-//     backend for the same feature, no schema change needed there).
+// Steel-backed NotebookLM login flow. The browser session is persisted by
+// Steel Profiles; this function stores only the opaque profile id in Supabase.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -83,8 +32,6 @@ function json(body: unknown, status = 200): Response {
 }
 
 function steelHeaders(): Record<string, string> {
-  // Confirmed directly from Steel's own auth docs: "When calling the REST
-  // API directly, send your key in the steel-api-key header."
   return { "steel-api-key": STEEL_API_KEY, "content-type": "application/json" };
 }
 
@@ -120,7 +67,7 @@ async function markConnected(userId: string): Promise<void> {
   await supabase.from("notebooklm_connections").upsert(
     {
       user_id: userId,
-      vault_secret_name: `steel_profile:${STEEL_PURPOSE}`, // label only, not a secret -- the real state lives in Steel's own Profile, referenced by browserbase_contexts.context_id
+      vault_secret_name: `steel_profile:${STEEL_PURPOSE}`,
       connected_at: new Date().toISOString(),
       disconnected_at: null,
       status: "connected",
@@ -128,10 +75,6 @@ async function markConnected(userId: string): Promise<void> {
     { onConflict: "user_id" },
   );
 }
-
-// --- Minimal CDP client -- identical protocol to browserbase-login's,
-// just pointed at Steel's websocketUrl instead of Browserbase's
-// connectUrl. See that file for the full reasoning on why /type exists. ---
 
 interface AttachedPage {
   ws: WebSocket;
@@ -192,9 +135,6 @@ async function attachToPage(wsUrl: string, knownTargetId?: string): Promise<Atta
   };
 }
 
-// Reuses one attached CDP connection per session across multiple /type
-// calls -- see the file header comment for the real, stated limitation
-// (doesn't survive a cold start).
 const pageConnections = new Map<string, AttachedPage>();
 
 async function getOrAttachPage(sessionId: string, wsUrl: string, knownTargetId?: string): Promise<AttachedPage> {
@@ -217,16 +157,24 @@ function closeCachedPage(sessionId: string): void {
     try {
       cached.ws.close();
     } catch {
-      // already closed -- fine
+      // already closed
     }
   }
 }
 
 interface SteelSession {
   id: string;
-  sessionViewerUrl: string;
+  sessionViewerUrl?: string;
+  debugUrl?: string;
   websocketUrl: string;
   profileId?: string;
+}
+
+function interactiveDebugUrl(debugUrl: string): string {
+  const url = new URL(debugUrl);
+  url.searchParams.set("interactive", "true");
+  url.searchParams.set("showControls", "true");
+  return url.toString();
 }
 
 serve(async (req) => {
@@ -235,7 +183,6 @@ serve(async (req) => {
   const url = new URL(req.url);
   const path = url.pathname.replace(/^\/steel-login/, "") || "/";
 
-  // --- GET /status ---
   if (req.method === "GET" && path === "/status") {
     const { user, error } = await requireUser(req);
     if (error) return error;
@@ -246,21 +193,15 @@ serve(async (req) => {
       .eq("user_id", user!.id)
       .maybeSingle();
     if (dbError) return json({ error: dbError.message }, 500);
-    return json(
-      data ?? { status: "disconnected", connected_at: null, disconnected_at: null, last_used_at: null },
-    );
+    return json(data ?? { status: "disconnected", connected_at: null, disconnected_at: null, last_used_at: null });
   }
 
-  // --- POST /start ---
   if (req.method === "POST" && path === "/start") {
     const { user, error } = await requireUser(req);
     if (error) return error;
 
     if (!STEEL_API_KEY) {
-      return json(
-        { error: "STEEL_API_KEY is not configured on the server. Add it as a secret and redeploy." },
-        503,
-      );
+      return json({ error: "STEEL_API_KEY is not configured on the server. Add it as a secret and redeploy." }, 503);
     }
 
     try {
@@ -268,41 +209,38 @@ serve(async (req) => {
       const sessionRes = await fetch(`${STEEL_API}/sessions`, {
         method: "POST",
         headers: steelHeaders(),
-        body: JSON.stringify(
-          savedProfileId
-            ? { profileId: savedProfileId, persistProfile: true }
-            : { persistProfile: true },
-        ),
+        body: JSON.stringify(savedProfileId ? { profileId: savedProfileId, persistProfile: true } : { persistProfile: true }),
       });
       if (!sessionRes.ok) {
         throw new Error(`Failed to create Steel session: ${sessionRes.status} ${await sessionRes.text()}`);
       }
       const session = (await sessionRes.json()) as SteelSession;
-      if (!session.sessionViewerUrl || !session.websocketUrl) {
-        throw new Error("Steel session response was missing sessionViewerUrl or websocketUrl.");
+      if (!session.websocketUrl) {
+        throw new Error("Steel session response was missing websocketUrl.");
       }
 
-      // Save the profileId immediately, not just on /complete -- harmless if
-      // the user abandons the login, it just gets reused and built on next
-      // time, and it means we never lose the reference even if /complete
-      // never gets called.
-      if (session.profileId) {
-        await saveProfileId(user!.id, session.profileId);
-      } else {
-        console.error("Steel session response had no profileId despite persistProfile: true.");
-      }
+      if (session.profileId) await saveProfileId(user!.id, session.profileId);
 
       const page = await getOrAttachPage(session.id, session.websocketUrl);
       await page.command("Page.navigate", { url: NOTEBOOKLM_URL });
 
-      return json({ sessionId: session.id, liveViewUrl: session.sessionViewerUrl });
+      // Steel's current embedded human-in-the-loop viewer is the debug URL,
+      // not sessionViewerUrl. The latter can show Steel's own sign-in UI in
+      // an iframe. debugUrl is explicitly designed for embedding; setting
+      // interactive=true enables remote clicks, scrolling and form input.
+      const debugUrl = session.debugUrl;
+      if (!debugUrl) throw new Error("Steel session response was missing debugUrl.");
+
+      return json({
+        sessionId: session.id,
+        liveViewUrl: interactiveDebugUrl(debugUrl),
+      });
     } catch (err) {
       console.error("steel-login /start failed:", err);
       return json({ error: String((err as Error)?.message ?? err) }, 500);
     }
   }
 
-  // --- POST /type  { sessionId, text, pressEnter? } ---
   if (req.method === "POST" && path === "/type") {
     const { error } = await requireUser(req);
     if (error) return error;
@@ -314,21 +252,10 @@ serve(async (req) => {
 
     try {
       const cached = pageConnections.get(sessionId);
-      if (!cached) {
-        throw new Error(
-          "No active session found for this sessionId -- this function instance was likely " +
-            "recycled between requests. Start a new login.",
-        );
-      }
+      if (!cached) throw new Error("No active session found for this sessionId -- this function instance was likely recycled between requests. Start a new login.");
       if (text) await cached.command("Input.insertText", { text });
       if (pressEnter) {
-        const enterParams = {
-          key: "Enter",
-          code: "Enter",
-          windowsVirtualKeyCode: 13,
-          nativeVirtualKeyCode: 13,
-          text: "\r",
-        };
+        const enterParams = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: "\r" };
         await cached.command("Input.dispatchKeyEvent", { type: "keyDown", ...enterParams });
         await cached.command("Input.dispatchKeyEvent", { type: "keyUp", ...enterParams });
       }
@@ -339,9 +266,6 @@ serve(async (req) => {
     }
   }
 
-  // --- POST /complete  { sessionId } ---
-  // No export step needed -- Steel's Profile (persistProfile: true, saved
-  // at /start) already has whatever the user logged into by this point.
   if (req.method === "POST" && path === "/complete") {
     const { user, error } = await requireUser(req);
     if (error) return error;
@@ -351,12 +275,7 @@ serve(async (req) => {
 
     try {
       closeCachedPage(sessionId);
-
-      await fetch(`${STEEL_API}/sessions/${sessionId}/release`, {
-        method: "POST",
-        headers: steelHeaders(),
-      }).catch(() => undefined);
-
+      await fetch(`${STEEL_API}/sessions/${sessionId}/release`, { method: "POST", headers: steelHeaders() }).catch(() => undefined);
       await markConnected(user!.id);
       return json({ ok: true });
     } catch (err) {
@@ -365,22 +284,12 @@ serve(async (req) => {
     }
   }
 
-  // --- POST /disconnect ---
   if (req.method === "POST" && path === "/disconnect") {
     const { user, error } = await requireUser(req);
     if (error) return error;
 
-    await supabase
-      .from("browserbase_contexts")
-      .delete()
-      .eq("user_id", user!.id)
-      .eq("purpose", STEEL_PURPOSE);
-
-    await supabase
-      .from("notebooklm_connections")
-      .update({ status: "disconnected", disconnected_at: new Date().toISOString() })
-      .eq("user_id", user!.id);
-
+    await supabase.from("browserbase_contexts").delete().eq("user_id", user!.id).eq("purpose", STEEL_PURPOSE);
+    await supabase.from("notebooklm_connections").update({ status: "disconnected", disconnected_at: new Date().toISOString() }).eq("user_id", user!.id);
     return json({ ok: true });
   }
 
