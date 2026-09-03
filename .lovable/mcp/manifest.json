@@ -12,7 +12,7 @@
   "mcp": {
     "server": {
       "name": "google-nexus-gateway",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "title": "Google Nexus Gateway"
     },
     "tools": [
@@ -31,6 +31,42 @@
             "service": {
               "type": "string",
               "description": "Optional service filter, e.g. gmail, drive, calendar, video."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "search_capabilities",
+        "title": "Search Google capabilities",
+        "description": "Find Google Nexus capabilities by service, name, description, or implementation. Use this before call_capability when you know what you want to do but not the exact capability id.",
+        "annotations": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Text to match against capability id, service, title, or description."
+            },
+            "service": {
+              "type": "string",
+              "description": "Optional service filter such as drive, gmail, calendar, tasks, or github."
+            },
+            "mutating": {
+              "type": "boolean",
+              "description": "If set, return only read-only or mutating capabilities."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20,
+              "description": "Maximum number of matches."
             }
           },
           "additionalProperties": false,
@@ -88,6 +124,49 @@
           },
           "required": [
             "capability_id"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "batch_call_capabilities",
+        "title": "Run multiple Google capabilities",
+        "description": "Run several Google Nexus capabilities sequentially in one MCP round trip. Use this when an agent needs a small workflow such as Drive search followed by Docs read or Tasks creation. Calls execute in order and each result is returned separately.",
+        "annotations": {
+          "readOnlyHint": false,
+          "openWorldHint": true
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "calls": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "capability_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "input": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "capability_id"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "description": "Ordered capability calls to execute."
+            }
+          },
+          "required": [
+            "calls"
           ],
           "additionalProperties": false,
           "$schema": "http://json-schema.org/draft-07/schema#"
