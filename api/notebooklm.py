@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs
-
 from http.server import BaseHTTPRequestHandler
 
 
@@ -33,7 +32,7 @@ def _supabase_user(token):
     import urllib.request
 
     base = _env("SUPABASE_URL", "VITE_SUPABASE_URL").rstrip("/")
-    anon = _env("SUPABASE_ANON_KEY", "VITE_SUPABASE_ANON_KEY")
+    anon = _env("SUPABASE_ANON_KEY", "VITE_SUPABASE_ANON_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY")
     if not base or not anon or not token:
         return None
     request = urllib.request.Request(
@@ -60,21 +59,20 @@ def _master_token():
     return parsed
 
 
-def _run_nlm(args, profile_dir, timeout=50, input_bytes=None):
+def _run_nlm(args, profile_dir, timeout=50):
     storage = str(Path(profile_dir) / "storage_state.json")
     command = ["notebooklm", "--storage", storage, *args]
     completed = subprocess.run(
         command,
-        input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
-        text=input_bytes is None,
+        text=True,
         env={**os.environ, "NO_COLOR": "1"},
     )
-    stdout = completed.stdout if isinstance(completed.stdout, str) else completed.stdout.decode("utf-8", "replace")
-    stderr = completed.stderr if isinstance(completed.stderr, str) else completed.stderr.decode("utf-8", "replace")
+    stdout = completed.stdout
+    stderr = completed.stderr
     if completed.returncode != 0:
         message = stderr.strip() or stdout.strip() or f"notebooklm exited with {completed.returncode}"
         raise RuntimeError(message[-4000:])
@@ -92,8 +90,8 @@ def _with_profile(callback):
         profile = Path(tmp)
         (profile / "master_token.json").write_text(json.dumps(token), encoding="utf-8")
         os.chmod(profile / "master_token.json", 0o600)
-        # notebooklm-py documents this exact transaction: the durable master token
-        # sits beside storage_state.json and auth refresh mints a fresh web session.
+        # notebooklm-py documents this transaction: the durable master token sits
+        # beside storage_state.json and auth refresh mints a fresh web session.
         _run_nlm(["auth", "refresh", "--verify"], profile, timeout=20)
         return callback(profile)
 
@@ -142,7 +140,7 @@ def _execute(action, data, profile):
             args.append("--wait")
         return _run_nlm(args, profile, timeout=55)
     if action == "add-text":
-        args = ["source", "add", notebook_id, "--text", data["text"], "--title", data.get("title", "Web source")]
+        args = ["source", "add", notebook_id, "--text", data["text"], "--title", data.get("title", "Web note")]
         if data.get("wait"):
             args.append("--wait")
         return _run_nlm(args, profile, timeout=55)
