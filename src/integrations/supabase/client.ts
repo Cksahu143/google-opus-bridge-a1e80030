@@ -28,26 +28,20 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 }
 
 function createSupabaseClient() {
-  // Vercel deployments of Lovable projects can still have the legacy Vite
-  // variable names. Prefer the current publishable-key name but accept the
-  // legacy anon-key name so an otherwise valid deployment does not crash.
-  const SUPABASE_URL =
-    import.meta.env['VITE_SUPABASE_URL'] ||
-    import.meta.env['SUPABASE_URL'] ||
-    process.env['SUPABASE_URL'];
+  // This module runs in the browser. Only Vite-exposed variables belong here;
+  // never read process.env because it is a server-side Node API and may not
+  // exist in the browser bundle.
+  const SUPABASE_URL = import.meta.env['VITE_SUPABASE_URL'];
   const SUPABASE_PUBLISHABLE_KEY =
     import.meta.env['VITE_SUPABASE_PUBLISHABLE_KEY'] ||
-    import.meta.env['VITE_SUPABASE_ANON_KEY'] ||
-    import.meta.env['SUPABASE_PUBLISHABLE_KEY'] ||
-    process.env['SUPABASE_PUBLISHABLE_KEY'] ||
-    process.env['SUPABASE_ANON_KEY'];
+    import.meta.env['VITE_SUPABASE_ANON_KEY'];
 
   if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
     const missing = [
-      ...(!SUPABASE_URL ? ['VITE_SUPABASE_URL / SUPABASE_URL'] : []),
+      ...(!SUPABASE_URL ? ['VITE_SUPABASE_URL'] : []),
       ...(!SUPABASE_PUBLISHABLE_KEY ? ['VITE_SUPABASE_PUBLISHABLE_KEY / VITE_SUPABASE_ANON_KEY'] : []),
     ];
-    const message = `Missing Supabase environment variable(s): ${missing.join(', ')}.`;
+    const message = `Missing browser Supabase configuration: ${missing.join(', ')}. Configure these Vite public variables in the Vercel deployment.`;
     console.error(`[Supabase] ${message}`);
     throw new Error(message);
   }
