@@ -66,14 +66,12 @@ These sessions are useful for browser testing and other supported automation. Th
 
 ## Why there is no automatic consumer-login handoff
 
-Google's consumer NotebookLM/Gemini Notebook product does not currently expose a public API equivalent to the Gemini Notebook Enterprise API. Google does provide a documented API for **Gemini Notebook Enterprise**, including notebook creation, retrieval, deletion, sharing, and source management. That API is a separate enterprise product and requires its own Google Cloud setup/licensing/IAM. citeturn0search0turn0search1
+Google's current public documentation provides a programmatic API for **Gemini Notebook Enterprise**, including notebook management and source operations. That API is a separate enterprise product and requires its own Google Cloud setup, licensing, and IAM. The consumer Gemini Notebook product is a different surface.
 
 Therefore the project has two legitimate integration paths:
 
-1. **Consumer NotebookLM:** use the existing `notebooklm-py` server integration with its server-side authentication boundary.
+1. **Consumer NotebookLM / Gemini Notebook:** use the existing `notebooklm-py` server integration with its server-side authentication boundary.
 2. **Gemini Notebook Enterprise:** add a separate official Google Cloud adapter if the account/project is actually licensed and configured for that product.
-
-The Enterprise API is documented as Pre-GA and uses Google Cloud authentication. citeturn2view0
 
 ## iPad setup
 
@@ -111,6 +109,6 @@ The repository's `requirements.txt` pins `notebooklm-py[headless]==0.8.2`.
 
 ## Enterprise path
 
-If this account is actually using Gemini Notebook Enterprise, the official Google API is a much cleaner long-term adapter. Google documents API operations for notebooks and sources and requires Google Cloud authentication plus the appropriate enterprise setup. citeturn2view0turn0search1
+If this account is actually using Gemini Notebook Enterprise, the official Google API is a cleaner long-term adapter. Google's current docs cover notebook creation, retrieval, listing, deletion, sharing, and source management through the NotebookLM Enterprise APIs.
 
 That adapter should be implemented as a separate provider rather than silently treating an Enterprise notebook as a consumer NotebookLM notebook.
