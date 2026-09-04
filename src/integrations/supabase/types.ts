@@ -256,6 +256,42 @@ export type Database = {
         }
         Relationships: []
       }
+      notebooklm_browser_sessions: {
+        Row: {
+          browserql_url: string | null
+          created_at: string
+          expires_at: string | null
+          id: string
+          provider: string
+          provider_session_id: string
+          stop_url: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          browserql_url?: string | null
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          provider: string
+          provider_session_id: string
+          stop_url?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          browserql_url?: string | null
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          provider?: string
+          provider_session_id?: string
+          stop_url?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       notebooklm_connections: {
         Row: {
           connected_at: string
