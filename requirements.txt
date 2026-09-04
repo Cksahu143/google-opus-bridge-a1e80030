@@ -1,0 +1,1 @@
+notebooklm-py[headless]==0.8.2
