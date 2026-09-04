@@ -1,1 +1,2 @@
 notebooklm-py[headless]==0.8.2
+websockets==15.0.1
