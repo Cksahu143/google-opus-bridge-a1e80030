@@ -168,7 +168,7 @@ async function inspectNotebookLm(userId: string) {
     provider: "browserless",
     sessionId: session.provider_session_id,
     htmlLength: html.length,
-    textPreview: html.replace(/<script[\\s\\S]*?<\\/script>/gi, " ").replace(/<style[\\s\\S]*?<\\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 6000),
+    textPreview: html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 6000),
   };
 }
 
