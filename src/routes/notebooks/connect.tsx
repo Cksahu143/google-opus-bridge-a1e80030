@@ -11,7 +11,7 @@ export const Route = createFileRoute("/notebooks/connect")({
       { title: "Connect NotebookLM · Google Nexus" },
       {
         name: "description",
-        content: "Connect Google Nexus to the real NotebookLM service running on your trusted machine.",
+        content: "Connect Google Nexus to NotebookLM through a server-side browser gateway.",
       },
     ],
   }),
@@ -25,13 +25,13 @@ const SUPABASE_FUNCTIONS_URL =
 type State =
   | { step: "checking" }
   | { step: "offline"; message?: string }
-  | { step: "connected" };
+  | { step: "ready"; providers?: Record<string, boolean> };
 
 type ToolState =
   | { kind: "idle" }
-  | { kind: "running"; tool: "health" | "list" }
-  | { kind: "result"; tool: "health" | "list"; data: unknown }
-  | { kind: "error"; tool: "health" | "list"; message: string };
+  | { kind: "running"; tool: "health" | "start" | "inspect" | "stop" }
+  | { kind: "result"; tool: "health" | "start" | "inspect" | "stop"; data: unknown }
+  | { kind: "error"; tool: "health" | "start" | "inspect" | "stop"; message: string };
 
 function ConnectNotebookLmPage() {
   const [state, setState] = useState<State>({ step: "checking" });
@@ -47,26 +47,23 @@ function ConnectNotebookLmPage() {
     };
   }
 
+  async function gateway(action: "health" | "start-login" | "inspect" | "stop") {
+    const headers = await authHeaders(true);
+    if (!headers.Authorization) throw new Error("Sign in to Google Nexus first.");
+    const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/notebooklm-browser-gateway`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ action }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : `Gateway request failed (${res.status})`);
+    return data;
+  }
+
   async function checkService() {
     try {
-      const headers = await authHeaders();
-      if (!headers.Authorization) {
-        setState({ step: "offline", message: "Sign in to Google Nexus first." });
-        return;
-      }
-
-      const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/notebooklm-proxy/health`, { headers });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (!res.ok || data.ok !== true) {
-        setState({
-          step: "offline",
-          message:
-            data.error ??
-            "The NotebookLM service is not reachable. Start notebooklm-server on the trusted machine and check its secure network endpoint.",
-        });
-        return;
-      }
-      setState({ step: "connected" });
+      const data = await gateway("health");
+      setState({ step: "ready", providers: data.providers });
     } catch (err) {
       setState({ step: "offline", message: String((err as Error)?.message ?? err) });
     }
@@ -80,26 +77,23 @@ function ConnectNotebookLmPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function runTool(tool: "health" | "list") {
+  async function runTool(tool: "health" | "start" | "inspect" | "stop") {
     setToolState({ kind: "running", tool });
     try {
-      const headers = await authHeaders();
-      if (!headers.Authorization) throw new Error("You must be signed in.");
-
-      const endpoint =
-        tool === "health"
-          ? `${SUPABASE_FUNCTIONS_URL}/notebooklm-proxy/health`
-          : `${SUPABASE_FUNCTIONS_URL}/notebooklm-proxy/v1/notebooks`;
-      const res = await fetch(endpoint, { headers });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : `Request failed (${res.status})`);
+      const action = tool === "start" ? "start-login" : tool;
+      const data = await gateway(action);
       setToolState({ kind: "result", tool, data });
+      if (tool === "health") setState({ step: "ready", providers: data.providers });
     } catch (err) {
       setToolState({ kind: "error", tool, message: String((err as Error)?.message ?? err) });
     }
   }
 
-  const connected = state.step === "connected";
+  const providers = state.step === "ready" ? state.providers : undefined;
+  const liveUrl =
+    toolState.kind === "result" && toolState.tool === "start" && typeof toolState.data === "object" && toolState.data !== null
+      ? (toolState.data as { liveUrl?: string }).liveUrl
+      : undefined;
 
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col gap-6 px-4 py-16">
@@ -107,58 +101,69 @@ function ConnectNotebookLmPage() {
         <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">Google Nexus</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight text-foreground">Connect NotebookLM</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Nexus now talks to the real notebooklm-py service instead of trying to perform Google login inside Steel.
-          Your Google session cookies remain on the machine running notebooklm-server.
+          NotebookLM now uses a server-side browser gateway. Provider credentials stay in Supabase Edge Function secrets, while browser sessions stay isolated per signed-in user.
         </p>
       </div>
 
-      {state.step === "checking" && <p className="text-sm text-muted-foreground">Checking NotebookLM service…</p>}
+      {state.step === "checking" && <p className="text-sm text-muted-foreground">Checking browser gateway…</p>}
 
       {state.step === "offline" && (
         <div className="space-y-4 rounded-lg border border-border p-5">
           <div>
-            <p className="text-sm font-medium text-foreground">NotebookLM service is offline</p>
+            <p className="text-sm font-medium text-foreground">Browser gateway is not ready</p>
             <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
           </div>
-          <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-            <p className="font-medium text-foreground">On the trusted machine</p>
-            <p className="mt-1">Start notebooklm-server with NOTEBOOKLM_SERVER_TOKEN set, then expose it only through your secure private HTTPS/reverse-proxy path.</p>
-            <p className="mt-2">If the Google session has expired, run <code>notebooklm login</code> there. Do not put Google passwords or storage_state.json into Nexus.</p>
-          </div>
+          <p className="text-xs text-muted-foreground">
+            Configure the provider secret server-side, then check again. Never put provider tokens in VITE_* variables or browser code.
+          </p>
           <Button type="button" onClick={() => void checkService()} disabled={!userId}>Check again</Button>
         </div>
       )}
 
-      {connected && (
+      {state.step === "ready" && (
         <div className="space-y-4">
           <div className="rounded-lg border border-border p-5">
-            <p className="text-sm font-medium text-foreground">NotebookLM service connected</p>
+            <p className="text-sm font-medium text-foreground">Gateway online</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Requests are authenticated by Nexus and forwarded server-to-server. The browser never receives the NotebookLM service token.
+              Browserless is the active HTTP automation path. Cloudflare, Steel, and Browserbase can remain configured as additional provider paths without exposing their credentials to the client.
             </p>
+            {providers && (
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
+                {Object.entries(providers).map(([name, configured]) => (
+                  <div key={name} className="rounded border border-border px-2 py-2">
+                    <span className="font-medium text-foreground">{name}</span>: {configured ? "configured" : "not configured"}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="space-y-3 rounded-lg border border-border p-4">
-            <p className="text-xs font-medium text-muted-foreground">Test the real NotebookLM service</p>
+            <p className="text-xs font-medium text-muted-foreground">NotebookLM browser session</p>
             <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void runTool("health")}
-                disabled={toolState.kind === "running"}
-              >
-                {toolState.kind === "running" && toolState.tool === "health" ? "Checking…" : "Check service"}
+              <Button type="button" size="sm" onClick={() => void runTool("start")} disabled={toolState.kind === "running"}>
+                {toolState.kind === "running" && toolState.tool === "start" ? "Starting…" : "Open NotebookLM login"}
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                onClick={() => void runTool("list")}
-                disabled={toolState.kind === "running"}
-              >
-                {toolState.kind === "running" && toolState.tool === "list" ? "Loading…" : "List my real notebooks"}
+              <Button type="button" size="sm" variant="secondary" onClick={() => void runTool("inspect")} disabled={toolState.kind === "running"}>
+                {toolState.kind === "running" && toolState.tool === "inspect" ? "Inspecting…" : "Check session"}
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => void runTool("stop")} disabled={toolState.kind === "running"}>
+                Stop session
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => void runTool("health")} disabled={toolState.kind === "running"}>
+                Refresh providers
               </Button>
             </div>
+
+            {liveUrl && (
+              <div className="rounded-md bg-muted p-3">
+                <p className="text-xs text-muted-foreground">Interactive browser session is ready. Open it to complete Google/NotebookLM authentication.</p>
+                <a className="mt-2 inline-block text-sm font-medium underline" href={liveUrl} target="_blank" rel="noreferrer">
+                  Open remote NotebookLM browser
+                </a>
+              </div>
+            )}
+
             {toolState.kind === "result" && (
               <pre className="max-h-72 overflow-auto rounded bg-muted p-3 text-xs">{JSON.stringify(toolState.data, null, 2)}</pre>
             )}
