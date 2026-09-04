@@ -65,12 +65,14 @@ async function createBrowserlessSession() {
     body: JSON.stringify({
       ttl,
       stealth: true,
-      headless: false,
       ...(profile ? { profile } : {}),
     }),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`Browserless session creation failed (${response.status}).`);
+  if (!response.ok) {
+    const detail = typeof data?.message === "string" ? data.message : typeof data?.error === "string" ? data.error : "";
+    throw new Error(`Browserless session creation failed (${response.status})${detail ? `: ${detail}` : "."}`);
+  }
   if (!data?.id || !data?.browserQL || !data?.stop) throw new Error("Browserless returned an incomplete session.");
   return data as { id: string; browserQL: string; stop: string; ttl: number };
 }
@@ -79,10 +81,27 @@ async function runBrowserlessBql(browserQlUrl: string, query: string) {
   const response = await fetch(browserQlUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, variables: {}, operationName: query.match(/mutation\s+(\w+)/)?.[1] }),
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`Browserless BQL request failed (${response.status}).`);
+  const raw = await response.text();
+  let data: any = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    data = { raw: raw.slice(0, 2000) };
+  }
+  if (!response.ok) {
+    const detail = typeof data?.message === "string"
+      ? data.message
+      : Array.isArray(data?.errors) && data.errors[0]?.message
+        ? String(data.errors[0].message)
+        : typeof data?.error === "string"
+          ? data.error
+          : typeof data?.raw === "string"
+            ? data.raw
+            : "";
+    throw new Error(`Browserless BQL request failed (${response.status})${detail ? `: ${detail}` : "."}`);
+  }
   if (data?.errors?.length) throw new Error(String(data.errors[0]?.message || "Browserless BQL error."));
   return data;
 }
@@ -140,19 +159,31 @@ async function getUserSession(userId: string) {
 
 async function startLogin(userId: string) {
   const session = await createBrowserlessSession();
-  await replaceUserSession(userId, session);
-  const result = await runBrowserlessBql(session.browserQL, `
-    mutation OpenNotebookLM {
-      goto(url: "https://notebooklm.google.com/", waitUntil: domContentLoaded) { status }
-      liveURL(timeout: 600000, interactable: true, resizable: true, showBrowserInterface: false) { liveURL }
+  try {
+    await replaceUserSession(userId, session);
+    const result = await runBrowserlessBql(session.browserQL, `
+      mutation OpenNotebookLM {
+        goto(url: "https://notebooklm.google.com/", waitUntil: domContentLoaded) { status }
+        liveURL(timeout: 300000, interactable: true, resizable: true, showBrowserInterface: false) { liveURL }
+      }
+    `);
+    return {
+      provider: "browserless",
+      sessionId: session.id,
+      expiresAt: new Date(Date.now() + session.ttl).toISOString(),
+      liveUrl: result?.data?.liveURL?.liveURL ?? null,
+    };
+  } catch (error) {
+    await deleteBrowserlessSession(session.stop).catch(() => undefined);
+    if (supabase) {
+      await supabase
+        .from("notebooklm_browser_sessions")
+        .delete()
+        .eq("user_id", userId)
+        .eq("provider", "browserless");
     }
-  `);
-  return {
-    provider: "browserless",
-    sessionId: session.id,
-    expiresAt: new Date(Date.now() + session.ttl).toISOString(),
-    liveUrl: result?.data?.liveURL?.liveURL ?? null,
-  };
+    throw error;
+  }
 }
 
 async function inspectNotebookLm(userId: string) {
