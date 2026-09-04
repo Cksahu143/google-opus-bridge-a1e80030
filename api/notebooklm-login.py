@@ -144,50 +144,52 @@ def _browserless():
     return origin.rstrip("/"), token
 
 
-async def _cdp_call(ws_url, method, params=None, session_id=None, timeout=20):
-    next_id = 1
-    async with websockets.connect(f"{ws_url}&timeout=45000", open_timeout=15, close_timeout=5, max_size=8 * 1024 * 1024) as socket:
-        message = {"id": next_id, "method": method}
-        if params is not None:
-            message["params"] = params
-        if session_id:
-            message["sessionId"] = session_id
-        await socket.send(json.dumps(message))
-        while True:
-            raw = await asyncio.wait_for(socket.recv(), timeout=timeout)
-            response = json.loads(raw)
-            if response.get("id") != next_id:
-                continue
-            if "error" in response:
-                raise RuntimeError(response["error"].get("message") or "Browser session command failed.")
-            return response.get("result") or {}
+async def _recv_for_id(socket, message_id, timeout=20):
+    while True:
+        raw = await asyncio.wait_for(socket.recv(), timeout=timeout)
+        response = json.loads(raw)
+        if response.get("id") != message_id:
+            continue
+        if "error" in response:
+            raise RuntimeError(response["error"].get("message") or "Browser session command failed.")
+        return response.get("result") or {}
 
 
 async def _create_live_url(ws_url):
-    targets = await _cdp_call(ws_url, "Target.getTargets")
-    page = next((target for target in targets.get("targetInfos", []) if target.get("type") == "page"), None)
-    if not page:
-        raise RuntimeError("Browserless did not expose a login page target.")
-    attached = await _cdp_call(ws_url, "Target.attachToTarget", {"targetId": page["targetId"], "flatten": True})
-    session_id = attached.get("sessionId")
-    if not session_id:
-        raise RuntimeError("Could not attach to the Browserless login page.")
-    result = await _cdp_call(
-        ws_url,
-        "Browserless.liveURL",
-        {
-            "timeout": 540000,
-            "interactable": True,
-            "resizable": True,
-            "showBrowserInterface": False,
-            "emulateComponents": True,
-        },
-        session_id=session_id,
-    )
-    live_url = result.get("liveURL")
-    if not live_url:
-        raise RuntimeError(result.get("error") or "Browserless did not return a live login URL.")
-    return live_url
+    async with websockets.connect(f"{ws_url}&timeout=45000", open_timeout=15, close_timeout=5, max_size=8 * 1024 * 1024) as socket:
+        await socket.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
+        targets = await _recv_for_id(socket, 1)
+        page = next((target for target in targets.get("targetInfos", []) if target.get("type") == "page"), None)
+        if not page:
+            raise RuntimeError("Browserless did not expose a login page target.")
+
+        await socket.send(json.dumps({
+            "id": 2,
+            "method": "Target.attachToTarget",
+            "params": {"targetId": page["targetId"], "flatten": True},
+        }))
+        attached = await _recv_for_id(socket, 2)
+        session_id = attached.get("sessionId")
+        if not session_id:
+            raise RuntimeError("Could not attach to the Browserless login page.")
+
+        await socket.send(json.dumps({
+            "id": 3,
+            "sessionId": session_id,
+            "method": "Browserless.liveURL",
+            "params": {
+                "timeout": 540000,
+                "interactable": True,
+                "resizable": True,
+                "showBrowserInterface": False,
+                "emulateComponents": True,
+            },
+        }))
+        result = await _recv_for_id(socket, 3)
+        live_url = result.get("liveURL")
+        if not live_url:
+            raise RuntimeError(result.get("error") or "Browserless did not return a live login URL.")
+        return live_url
 
 
 def _start_browserless(user_id):
@@ -225,7 +227,11 @@ def _browserless_ws(session_id):
 
 
 async def _cdp_get_all_cookies(ws_url):
-    return (await _cdp_call(ws_url, "Network.getAllCookies")).get("cookies") or []
+    message_id = 1
+    async with websockets.connect(f"{ws_url}&timeout=45000", open_timeout=15, close_timeout=5, max_size=8 * 1024 * 1024) as socket:
+        await socket.send(json.dumps({"id": message_id, "method": "Network.getAllCookies"}))
+        result = await _recv_for_id(socket, message_id)
+        return result.get("cookies") or []
 
 
 def _stop_browserless(session):
@@ -248,22 +254,17 @@ def _exchange_master_token(email, oauth_token):
 
 
 def _verify_master_token(token_json):
-    with tempfile.TemporaryDirectory(prefix="notebooklm-master-verify-") as tmp:
-        profile = tempfile.TemporaryDirectory(prefix="notebooklm-profile-")
-        try:
-            profile_dir = profile.name
-            token_path = os.path.join(profile_dir, "master_token.json")
-            with open(token_path, "w", encoding="utf-8") as handle:
-                json.dump(token_json, handle, separators=(",", ":"))
-            os.chmod(token_path, 0o600)
-            storage = os.path.join(profile_dir, "storage_state.json")
-            command = ["notebooklm", "--storage", storage, "auth", "refresh", "--verify"]
-            completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25, check=False, env={**os.environ, "NO_COLOR": "1"})
-            if completed.returncode != 0:
-                message = completed.stderr.strip() or completed.stdout.strip() or "NotebookLM authentication verification failed"
-                raise RuntimeError(message[-2000:])
-        finally:
-            profile.cleanup()
+    with tempfile.TemporaryDirectory(prefix="notebooklm-master-verify-") as profile_dir:
+        token_path = os.path.join(profile_dir, "master_token.json")
+        with open(token_path, "w", encoding="utf-8") as handle:
+            json.dump(token_json, handle, separators=(",", ":"))
+        os.chmod(token_path, 0o600)
+        storage = os.path.join(profile_dir, "storage_state.json")
+        command = ["notebooklm", "--storage", storage, "auth", "refresh", "--verify"]
+        completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25, check=False, env={**os.environ, "NO_COLOR": "1"})
+        if completed.returncode != 0:
+            message = completed.stderr.strip() or completed.stdout.strip() or "NotebookLM authentication verification failed"
+            raise RuntimeError(message[-2000:])
 
 
 def _complete(user_id, email):
