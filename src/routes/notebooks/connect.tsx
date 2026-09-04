@@ -101,7 +101,7 @@ function ConnectNotebookLmPage() {
         <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">Google Nexus</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight text-foreground">Connect NotebookLM</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Choose the cloud browser provider for the NotebookLM login session. Credentials remain server-side in Supabase Edge Function secrets.
+          NotebookLM authentication uses a trusted browser bootstrap and a persistent server session. Cloud browser providers remain available for ordinary browser automation and testing.
         </p>
       </div>
 
@@ -121,8 +121,29 @@ function ConnectNotebookLmPage() {
       {state.step === "ready" && (
         <div className="space-y-4">
           <div className="rounded-lg border border-border p-5">
-            <p className="text-sm font-medium text-foreground">Browser gateway online</p>
-            <p className="mt-1 text-sm text-muted-foreground">Pick a provider, or use Auto to try the best configured path first and fall back if it fails.</p>
+            <p className="text-sm font-medium text-foreground">Google authentication</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Do not sign into Google inside a Browserless, Browserbase, Steel, or Cloudflare remote browser. Google can reject OAuth in automated or embedded browser environments with “This browser or app may not be secure.”
+            </p>
+            <div className="mt-4 rounded-md bg-muted p-3">
+              <p className="text-xs font-medium text-foreground">One-time trusted-browser bootstrap</p>
+              <p className="mt-1 text-xs text-muted-foreground">Run this on the Mac or another normal browser machine. Use a dedicated NotebookLM account for the persistent service.</p>
+              <pre className="mt-3 overflow-x-auto rounded bg-background p-3 text-xs">pip install "notebooklm-py[browser,headless]"{`\n`}notebooklm login --master-token --account YOUR_DEDICATED_NOTEBOOKLM_ACCOUNT</pre>
+              <p className="mt-2 text-xs text-muted-foreground">The resulting master_token.json is a full-account credential. Never commit it, paste it into chat, or place it in VITE_* variables.</p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border p-5">
+            <p className="text-sm font-medium text-foreground">Persistent NotebookLM service</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              After the one-time bootstrap, move the profile securely to the persistent Linux VM and run the maintained notebooklm-py remote MCP deployment. The Bridge then talks to that authenticated service instead of asking Google to authenticate inside a cloud browser.
+            </p>
+            <p className="mt-3 text-xs text-muted-foreground">Deployment guide: <code>deploy/notebooklm-mcp/README.md</code> · Auth guide: <code>docs/NOTEBOOKLM_GOOGLE_AUTH.md</code></p>
+          </div>
+
+          <div className="rounded-lg border border-border p-5">
+            <p className="text-sm font-medium text-foreground">Browser automation providers</p>
+            <p className="mt-1 text-sm text-muted-foreground">These sessions are still useful for non-Google OAuth automation and provider testing. They are not the NotebookLM authentication mechanism.</p>
             {providers && (
               <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {(Object.keys(PROVIDER_LABELS) as Array<Exclude<Provider, "auto">>).map((name) => (
@@ -146,10 +167,10 @@ function ConnectNotebookLmPage() {
             </div>
 
             <div>
-              <p className="text-xs font-medium text-muted-foreground">NotebookLM browser session</p>
+              <p className="text-xs font-medium text-muted-foreground">Remote browser test</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button type="button" size="sm" onClick={() => void runTool("start")} disabled={toolState.kind === "running" || (provider !== "auto" && !providers?.[provider])}>
-                  {toolState.kind === "running" && toolState.tool === "start" ? "Starting…" : "Open NotebookLM login"}
+                  {toolState.kind === "running" && toolState.tool === "start" ? "Starting…" : "Open remote browser test"}
                 </Button>
                 <Button type="button" size="sm" variant="outline" onClick={() => void runTool("stop")} disabled={toolState.kind === "running"}>Stop all sessions</Button>
                 <Button type="button" size="sm" variant="ghost" onClick={() => void runTool("health")} disabled={toolState.kind === "running"}>Refresh providers</Button>
@@ -158,8 +179,8 @@ function ConnectNotebookLmPage() {
 
             {liveUrl && (
               <div className="rounded-md bg-muted p-3">
-                <p className="text-xs text-muted-foreground">{activeProvider ? `${PROVIDER_LABELS[activeProvider as Exclude<Provider, "auto">] ?? activeProvider} session is ready.` : "Interactive browser session is ready."} Open it to complete Google/NotebookLM authentication.</p>
-                <a className="mt-2 inline-block text-sm font-medium underline" href={liveUrl} target="_blank" rel="noreferrer">Open remote NotebookLM browser</a>
+                <p className="text-xs text-muted-foreground">{activeProvider ? `${PROVIDER_LABELS[activeProvider as Exclude<Provider, "auto">] ?? activeProvider} session is ready.` : "Interactive browser session is ready."} This is a provider test session, not the Google authentication path.</p>
+                <a className="mt-2 inline-block text-sm font-medium underline" href={liveUrl} target="_blank" rel="noreferrer">Open remote browser</a>
               </div>
             )}
 
