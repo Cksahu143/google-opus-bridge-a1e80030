@@ -7,6 +7,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 
 import gpsoauth
@@ -119,7 +120,7 @@ def _upsert_session(user_id, session_id, live_url, stop_url, expires_at):
             "browserql_url": live_url,
             "stop_url": stop_url,
             "expires_at": expires_at,
-            "updated_at": expires_at,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
@@ -143,54 +144,76 @@ def _browserless():
     return origin.rstrip("/"), token
 
 
+async def _cdp_call(ws_url, method, params=None, session_id=None, timeout=20):
+    next_id = 1
+    async with websockets.connect(f"{ws_url}&timeout=45000", open_timeout=15, close_timeout=5, max_size=8 * 1024 * 1024) as socket:
+        message = {"id": next_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        if session_id:
+            message["sessionId"] = session_id
+        await socket.send(json.dumps(message))
+        while True:
+            raw = await asyncio.wait_for(socket.recv(), timeout=timeout)
+            response = json.loads(raw)
+            if response.get("id") != next_id:
+                continue
+            if "error" in response:
+                raise RuntimeError(response["error"].get("message") or "Browser session command failed.")
+            return response.get("result") or {}
+
+
+async def _create_live_url(ws_url):
+    targets = await _cdp_call(ws_url, "Target.getTargets")
+    page = next((target for target in targets.get("targetInfos", []) if target.get("type") == "page"), None)
+    if not page:
+        raise RuntimeError("Browserless did not expose a login page target.")
+    attached = await _cdp_call(ws_url, "Target.attachToTarget", {"targetId": page["targetId"], "flatten": True})
+    session_id = attached.get("sessionId")
+    if not session_id:
+        raise RuntimeError("Could not attach to the Browserless login page.")
+    result = await _cdp_call(
+        ws_url,
+        "Browserless.liveURL",
+        {
+            "timeout": 540000,
+            "interactable": True,
+            "resizable": True,
+            "showBrowserInterface": False,
+            "emulateComponents": True,
+        },
+        session_id=session_id,
+    )
+    live_url = result.get("liveURL")
+    if not live_url:
+        raise RuntimeError(result.get("error") or "Browserless did not return a live login URL.")
+    return live_url
+
+
 def _start_browserless(user_id):
     origin, token = _browserless()
     status, session = _request_json(
         f"{origin}/session?token={urllib.parse.quote(token)}",
         method="POST",
-        body={"ttl": SESSION_TTL_MS, "stealth": True, "headless": True},
+        body={"ttl": SESSION_TTL_MS, "headless": True, "url": NOTEBOOKLM_EMBEDDED_SETUP},
         timeout=15,
     )
-    if status < 200 or status >= 300 or not session.get("id") or not session.get("browserQL") or not session.get("stop"):
+    if status < 200 or status >= 300 or not session.get("id") or not session.get("connect") or not session.get("stop"):
         message = session.get("message") or session.get("error") or f"Browserless session creation failed ({status})."
         raise RuntimeError(str(message))
 
-    query = '''mutation OpenEmbeddedSetup {
-      goto(url: "https://accounts.google.com/EmbeddedSetup", waitUntil: domContentLoaded) { status }
-      liveURL(timeout: 540000, interactable: true, resizable: true, showBrowserInterface: false, emulateComponents: true) { liveURL }
-    }'''
-    status, result = _request_json(
-        session["browserQL"],
-        method="POST",
-        body={"query": query, "operationName": "OpenEmbeddedSetup"},
-        timeout=20,
-    )
-    if status < 200 or status >= 300 or result.get("errors"):
-        message = (result.get("errors") or [{}])[0].get("message") if isinstance(result.get("errors"), list) else None
-        raise RuntimeError(message or f"Browserless live login creation failed ({status}).")
+    try:
+        live_url = asyncio.run(_create_live_url(session["connect"]))
+    except Exception:
+        try:
+            urllib.request.urlopen(urllib.request.Request(session["stop"], method="DELETE"), timeout=8).close()
+        except Exception:
+            pass
+        raise
 
-    live_url = ((result.get("data") or {}).get("liveURL") or {}).get("liveURL")
-    if not live_url:
-        raise RuntimeError("Browserless did not return a live login URL.")
-
-    from datetime import datetime, timedelta, timezone
     expires_at = (datetime.now(timezone.utc) + timedelta(milliseconds=SESSION_TTL_MS)).isoformat()
     _upsert_session(user_id, session["id"], live_url, session["stop"], expires_at)
     return {"provider": "browserless", "sessionId": session["id"], "liveUrl": live_url, "expiresAt": expires_at}
-
-
-async def _cdp_get_all_cookies(ws_url):
-    message_id = 1
-    async with websockets.connect(f"{ws_url}&timeout=45000", open_timeout=15, close_timeout=5, max_size=8 * 1024 * 1024) as socket:
-        await socket.send(json.dumps({"id": message_id, "method": "Network.getAllCookies"}))
-        while True:
-            raw = await asyncio.wait_for(socket.recv(), timeout=20)
-            message = json.loads(raw)
-            if message.get("id") != message_id:
-                continue
-            if "error" in message:
-                raise RuntimeError("Browser session could not be inspected after login.")
-            return (message.get("result") or {}).get("cookies") or []
 
 
 def _browserless_ws(session_id):
@@ -199,6 +222,10 @@ def _browserless_ws(session_id):
     scheme = "wss" if parsed.scheme == "https" else "ws"
     host = parsed.netloc
     return f"{scheme}://{host}/session/connect/{urllib.parse.quote(session_id)}?token={urllib.parse.quote(token)}"
+
+
+async def _cdp_get_all_cookies(ws_url):
+    return (await _cdp_call(ws_url, "Network.getAllCookies")).get("cookies") or []
 
 
 def _stop_browserless(session):
@@ -222,16 +249,21 @@ def _exchange_master_token(email, oauth_token):
 
 def _verify_master_token(token_json):
     with tempfile.TemporaryDirectory(prefix="notebooklm-master-verify-") as tmp:
-        profile = Path(tmp)
-        token_path = profile / "master_token.json"
-        token_path.write_text(json.dumps(token_json), encoding="utf-8")
-        os.chmod(token_path, 0o600)
-        storage = profile / "storage_state.json"
-        command = ["notebooklm", "--storage", str(storage), "auth", "refresh", "--verify"]
-        completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25, check=False, env={**os.environ, "NO_COLOR": "1"})
-        if completed.returncode != 0:
-            message = (completed.stderr.strip() or completed.stdout.strip() or "NotebookLM authentication verification failed")
-            raise RuntimeError(message[-2000:])
+        profile = tempfile.TemporaryDirectory(prefix="notebooklm-profile-")
+        try:
+            profile_dir = profile.name
+            token_path = os.path.join(profile_dir, "master_token.json")
+            with open(token_path, "w", encoding="utf-8") as handle:
+                json.dump(token_json, handle, separators=(",", ":"))
+            os.chmod(token_path, 0o600)
+            storage = os.path.join(profile_dir, "storage_state.json")
+            command = ["notebooklm", "--storage", storage, "auth", "refresh", "--verify"]
+            completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25, check=False, env={**os.environ, "NO_COLOR": "1"})
+            if completed.returncode != 0:
+                message = completed.stderr.strip() or completed.stdout.strip() or "NotebookLM authentication verification failed"
+                raise RuntimeError(message[-2000:])
+        finally:
+            profile.cleanup()
 
 
 def _complete(user_id, email):
@@ -245,7 +277,7 @@ def _complete(user_id, email):
         cookies = asyncio.run(_cdp_get_all_cookies(_browserless_ws(session["provider_session_id"])))
         oauth_cookie = next((cookie for cookie in cookies if cookie.get("name") == "oauth_token"), None)
         if not oauth_cookie or not oauth_cookie.get("value"):
-            raise RuntimeError("Google has not completed the EmbeddedSetup login yet. Finish the Google sign-in in the remote browser, then press Finish again.")
+            raise RuntimeError("Google has not completed the EmbeddedSetup login yet. Finish the Google sign-in in the remote browser, close the remote-browser tab, then press Finish again.")
 
         token_json = _exchange_master_token(email, oauth_cookie["value"])
         _verify_master_token(token_json)
