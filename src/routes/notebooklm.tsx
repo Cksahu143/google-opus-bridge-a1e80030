@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { RefreshCw, Send, Trash2, Plus, BookOpen, ShieldCheck } from "lucide-react";
+import { RefreshCw, Send, Trash2, Plus, BookOpen, ShieldCheck, ExternalLink, CheckCircle2 } from "lucide-react";
 import { useSession } from "@/lib/useSession";
 
 type Notebook = { id?: string; notebook_id?: string; title?: string; name?: string };
 type Source = { id?: string; source_id?: string; title?: string; name?: string; url?: string };
 
 type ApiResult = { ok: boolean; data?: unknown; error?: string };
+
+type ConnectionState = "idle" | "checking" | "connected" | "error";
+
+const NOTEBOOKLM_URL = "https://notebooklm.google.com/";
 
 async function callApi(token: string, action: string, body: Record<string, unknown> = {}) {
   const response = await fetch("/api/notebooklm", {
@@ -40,9 +44,28 @@ export default function NotebookLMPage() {
   const [newTitle, setNewTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [connection, setConnection] = useState<ConnectionState>("idle");
 
   const token = session?.access_token || "";
   const selected = useMemo(() => notebooks.find((n) => idOf(n) === selectedId), [notebooks, selectedId]);
+
+  function openNotebookLM() {
+    window.open(NOTEBOOKLM_URL, "_blank", "noopener,noreferrer");
+  }
+
+  async function checkConnection() {
+    if (!token) return;
+    setConnection("checking");
+    setError("");
+    try {
+      await callApi(token, "health");
+      setConnection("connected");
+      await refresh();
+    } catch (e) {
+      setConnection("error");
+      setError(e instanceof Error ? e.message : "NotebookLM connection check failed");
+    }
+  }
 
   async function refresh() {
     if (!token) return;
@@ -55,8 +78,12 @@ export default function NotebookLMPage() {
       })) as Notebook[];
       const list = Array.isArray(data) ? data : [];
       setNotebooks(list);
+      setConnection("connected");
       if (!selectedId && list[0]) setSelectedId(idOf(list[0]));
-    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load notebooks"); }
+    } catch (e) {
+      setConnection("error");
+      setError(e instanceof Error ? e.message : "Unable to load notebooks");
+    }
     finally { setBusy(false); }
   }
 
@@ -68,7 +95,7 @@ export default function NotebookLMPage() {
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to load sources"); }
   }
 
-  useEffect(() => { void refresh(); }, [token]);
+  useEffect(() => { void checkConnection(); }, [token]);
   useEffect(() => { void refreshSources(); }, [token, selectedId]);
 
   async function ask() {
@@ -129,12 +156,21 @@ export default function NotebookLMPage() {
     <main className="min-h-screen bg-background p-4 md:p-8">
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="flex flex-wrap items-center justify-between gap-4">
-          <div><div className="flex items-center gap-2"><BookOpen className="h-6 w-6" /><h1 className="text-2xl font-semibold">NotebookLM Bridge</h1></div><p className="text-sm text-muted-foreground">Web access powered by notebooklm-py.</p></div>
-          <button className="inline-flex items-center gap-2 rounded-lg border px-3 py-2" onClick={() => void refresh()} disabled={busy}><RefreshCw className="h-4 w-4" /> Refresh</button>
+          <div><div className="flex items-center gap-2"><BookOpen className="h-6 w-6" /><h1 className="text-2xl font-semibold">NotebookLM Bridge</h1></div><p className="text-sm text-muted-foreground">Your iPad-friendly NotebookLM workspace.</p></div>
+          <div className="flex flex-wrap gap-2">
+            <button className="inline-flex items-center gap-2 rounded-lg border px-3 py-2" onClick={openNotebookLM}><ExternalLink className="h-4 w-4" /> Open NotebookLM</button>
+            <button className="inline-flex items-center gap-2 rounded-lg border px-3 py-2" onClick={() => void checkConnection()} disabled={busy || connection === "checking"}><RefreshCw className="h-4 w-4" /> {connection === "checking" ? "Checking…" : "Check connection"}</button>
+          </div>
         </header>
 
         <section className="rounded-xl border p-4">
-          <div className="flex items-center gap-2 text-sm"><ShieldCheck className="h-4 w-4" /> Server-side NotebookLM credentials; they never enter this page.</div>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-medium"><ShieldCheck className="h-4 w-4" /> Secure server-side NotebookLM connection</div>
+              <p className="mt-1 text-sm text-muted-foreground">Sign in to NotebookLM normally in the official Google page, then return here. The Bridge uses its already-configured server credential; no Google password or credential is entered into this app.</p>
+            </div>
+            {connection === "connected" && <div className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm"><CheckCircle2 className="h-4 w-4" /> Connected</div>}
+          </div>
           {error && <p className="mt-3 rounded-lg border border-destructive/40 p-3 text-sm text-destructive">{error}</p>}
         </section>
 
