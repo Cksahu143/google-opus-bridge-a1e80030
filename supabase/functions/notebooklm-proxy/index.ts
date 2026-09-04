@@ -39,10 +39,10 @@ async function requireUser(req: Request): Promise<Response | null> {
   return null;
 }
 
-function serviceUrl(path: string): string {
+function serviceUrl(path: string, search = ""): string {
   if (!NOTEBOOKLM_BASE_URL) throw new Error("NOTEBOOKLM_BASE_URL is not configured.");
   const base = NOTEBOOKLM_BASE_URL.replace(/\/$/, "");
-  return `${base}${path}`;
+  return `${base}${path}${search}`;
 }
 
 function serviceHeaders(contentType?: string): Record<string, string> {
@@ -63,7 +63,7 @@ function allowedPath(path: string): boolean {
     /^\/v1\/notebooks\/[^/]+\/suggested-prompts$/.test(path) ||
     /^\/v1\/notebooks\/[^/]+\/chat$/.test(path) ||
     /^\/v1\/notebooks\/[^/]+\/chat\/configure$/.test(path) ||
-    /^\/v1\/notebooks\/[^/]+\/sources\/(url|text|batch)$/.test(path) ||
+    /^\/v1\/notebooks\/[^/]+\/sources\/(url|text|file|batch)$/.test(path) ||
     /^\/v1\/notebooks\/[^/]+\/sources\/[^/]+$/.test(path) ||
     /^\/v1\/notebooks\/[^/]+\/sources\/[^/]+\/content$/.test(path)
   );
@@ -73,13 +73,13 @@ function allowedMethod(path: string, method: string): boolean {
   if (path === "/v1/notebooks") return ["GET", "POST"].includes(method);
   if (/\/suggested-prompts$/.test(path)) return method === "GET";
   if (/\/chat$/.test(path) || /\/chat\/configure$/.test(path)) return method === "POST";
-  if (/\/sources\/(url|text|batch)$/.test(path)) return method === "POST";
+  if (/\/sources\/(url|text|file|batch)$/.test(path)) return method === "POST";
   if (/\/sources\/[^/]+\/content$/.test(path)) return method === "GET";
   if (/\/sources\/[^/]+$/.test(path)) return ["PATCH", "DELETE"].includes(method);
   return ["GET", "PATCH", "DELETE"].includes(method);
 }
 
-async function proxy(req: Request, path: string): Promise<Response> {
+async function proxy(req: Request, path: string, search: string): Promise<Response> {
   if (!NOTEBOOKLM_BASE_URL || !NOTEBOOKLM_SERVER_TOKEN) {
     return json(
       {
@@ -96,7 +96,7 @@ async function proxy(req: Request, path: string): Promise<Response> {
   const contentType = req.headers.get("content-type") ?? undefined;
   const body = req.method === "GET" || req.method === "DELETE" ? undefined : await req.arrayBuffer();
 
-  const upstream = await fetch(serviceUrl(path), {
+  const upstream = await fetch(serviceUrl(path, search), {
     method: req.method,
     headers: serviceHeaders(contentType),
     body,
@@ -134,7 +134,7 @@ serve(async (req) => {
   }
 
   try {
-    return await proxy(req, path);
+    return await proxy(req, path, url.search);
   } catch (err) {
     console.error("notebooklm-proxy failed:", err);
     return json({ error: String((err as Error)?.message ?? err) }, 502);
