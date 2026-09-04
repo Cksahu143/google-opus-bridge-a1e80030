@@ -1,128 +1,116 @@
-# NotebookLM Integration — Persistent Remote MCP
+# NotebookLM Integration — iPad-First Bridge
 
-Status: **REMOTE MCP ARCHITECTURE READY; CLOUD VM + ONE-TIME AUTH BOOTSTRAP REQUIRED**
+Status: **web bridge implemented; consumer NotebookLM browser-login handoff is intentionally not treated as credential transfer**
 
-The Bridge is now designed so the long-running NotebookLM MCP service does **not** depend on the user's Mac being online. The durable service runs on a persistent Linux VM using the maintained `notebooklm-py` remote MCP deployment. The Mac is only needed for the one-time Google/NotebookLM master-token bootstrap.
+## Goal
 
-## Architecture
-
-```text
-                         ┌─────────────────────┐
-                         │ ChatGPT / Claude     │
-                         │ remote MCP client    │
-                         └──────────┬──────────┘
-                                    │
-                              HTTPS /mcp
-                              OAuth
-                                    │
-                         ┌──────────▼──────────┐
-                         │ Cloudflare/Tailscale │
-                         │ tunnel                │
-                         └──────────┬──────────┘
-                                    │
-                         ┌──────────▼──────────┐
-                         │ Persistent Linux VM  │
-                         │ Docker               │
-                         │ notebooklm-mcp       │
-                         └──────────┬──────────┘
-                                    │
-                         master-token auth
-                                    │
-                         ┌──────────▼──────────┐
-                         │ Consumer NotebookLM │
-                         └─────────────────────┘
-
-Bridge web UI:
-Browser → Supabase JWT → notebooklm-proxy → configured NotebookLM service
-```
-
-## Why this replaces the old Mac-server design
-
-The previous design required a trusted machine to keep `notebooklm-server` running and reachable. That was operationally fragile and meant the service disappeared when the Mac was asleep or offline.
-
-The new design moves the durable NotebookLM process to a persistent VM. The VM runs Docker continuously and exposes the MCP endpoint through a secure HTTPS tunnel. The repository contains the deployment documentation under `deploy/notebooklm-mcp/` but does not contain credentials or provider-specific secrets.
-
-## Upstream implementation
-
-The remote MCP runtime is intentionally based on the maintained `teng-lin/notebooklm-py` deployment rather than a forked implementation. Its current deployment provides a prebuilt Docker image, persistent profile support, Cloudflare/Tailscale tunnel options, and self-hosted OAuth for ChatGPT.
-
-Reference: https://github.com/teng-lin/notebooklm-py/tree/main/deploy
-
-## Authentication
-
-The recommended unattended path is the upstream master-token flow:
-
-1. On a machine with a browser, run `notebooklm login --master-token` once.
-2. Transfer the resulting profile securely to the VM.
-3. The VM keeps the master token and writable session state on its private filesystem.
-4. `notebooklm-mcp` can refresh the web session without requiring a browser on the VM.
-
-This is deliberately **not** implemented as remote browser automation. The upstream project documents the master token as a durable, full-account credential and recommends a dedicated/throwaway Google account.
-
-## ChatGPT connection
-
-ChatGPT's custom MCP connector uses OAuth rather than a static bearer token. The remote deployment therefore needs:
-
-- `NOTEBOOKLM_MCP_OAUTH_PASSWORD`
-- `NOTEBOOKLM_MCP_OAUTH_BASE_URL` set to the bare HTTPS origin
-- a public HTTPS tunnel whose whole host routes to the MCP server
-
-The connector URL is:
+The intended user experience is:
 
 ```text
-https://YOUR_HOSTNAME/mcp
+ iPad
+   ↓
+ Google Nexus Bridge
+   ↓
+ Open official Gemini Notebook / NotebookLM
+   ↓
+ user signs in normally in the top-level browser
+   ↓
+ Bridge uses a separately configured, server-side NotebookLM integration
+   ↓
+ notebooks / questions / sources
 ```
 
-The OAuth base URL must **not** include `/mcp`.
+The Bridge must never capture, copy, return, or store Google browser cookies, bearer tokens, passwords, or other credentials from the iPad browser.
 
-Current OpenAI documentation says custom MCP apps/connectors are remote and that local MCP servers cannot be connected directly. Full write-capable MCP support is currently plan-dependent; Pro supports read/fetch MCP access while full MCP write/modify support is rolling out to Business, Enterprise and Edu. Verify the current plan requirements before relying on NotebookLM mutation tools.
+## Important authentication boundary
 
-## Existing Supabase proxy
+Signing into the consumer Gemini Notebook / NotebookLM website in Safari or Chrome does **not** automatically grant the Vercel function access to that browser session. The browser session and the server session are separate security boundaries.
 
-`supabase/functions/notebooklm-proxy/index.ts` remains an authenticated REST bridge for the existing web application. It is intentionally not the long-running MCP process.
+The current Vercel web API therefore uses the configured `NOTEBOOKLM_MASTER_TOKEN_JSON` server credential for `notebooklm-py`. The value is server-side only. It is never put in `VITE_*`, localStorage, an API response, or the UI.
 
-The proxy:
+This is deliberate: extracting a Google session cookie or bearer credential from a browser after login would turn the Bridge into a credential-capture mechanism and is not part of this project.
 
-- verifies the signed-in Supabase user;
-- keeps its upstream service credential server-side;
-- uses a narrow NotebookLM REST allowlist;
-- forwards query strings;
-- supports URL/text/file/batch source routes;
-- provides an authenticated `/health` check.
+## Current web API
 
-The MCP deployment and the browser REST bridge should not run competing NotebookLM consumers against the same account/profile. The upstream project documents the account as single-consumer because concurrent session re-minting can invalidate sessions.
+`api/notebooklm.py` exposes an authenticated Vercel Python Function at `/api/notebooklm`.
 
-## Deployment
+Supported actions:
 
-See `deploy/notebooklm-mcp/README.md` for the VM architecture and secure deployment contract.
+- `health`
+- `list`
+- `get`
+- `create`
+- `delete`
+- `ask`
+- `sources`
+- `add-url`
+- `add-text`
+- `delete-source`
 
-A cloud VM is an external infrastructure dependency. The GitHub repository cannot create or operate a persistent VM on its own. Oracle Cloud currently advertises Always Free compute capacity, subject to account, region, and capacity constraints; another persistent VM provider can be substituted without changing the MCP architecture.
+Every request requires the existing Supabase access token.
+
+The health response reports whether the server-side NotebookLM credential is configured without returning its value.
+
+## Browser gateway
+
+`supabase/functions/notebooklm-browser-gateway` remains available as a provider abstraction for remote browser sessions.
+
+Providers:
+
+- Browserbase
+- Steel
+- Browserless
+- Cloudflare
+
+These sessions are useful for browser testing and other supported automation. They are **not** advertised as a way to bypass Google's authentication protections. If Google rejects a remote browser, the Bridge reports the failure rather than spoofing browser identity or circumventing the protection.
+
+## Why there is no automatic consumer-login handoff
+
+Google's consumer NotebookLM/Gemini Notebook product does not currently expose a public API equivalent to the Gemini Notebook Enterprise API. Google does provide a documented API for **Gemini Notebook Enterprise**, including notebook creation, retrieval, deletion, sharing, and source management. That API is a separate enterprise product and requires its own Google Cloud setup/licensing/IAM. citeturn0search0turn0search1
+
+Therefore the project has two legitimate integration paths:
+
+1. **Consumer NotebookLM:** use the existing `notebooklm-py` server integration with its server-side authentication boundary.
+2. **Gemini Notebook Enterprise:** add a separate official Google Cloud adapter if the account/project is actually licensed and configured for that product.
+
+The Enterprise API is documented as Pre-GA and uses Google Cloud authentication. citeturn2view0
+
+## iPad setup
+
+1. Sign into the Google Nexus Bridge normally.
+2. Open `/notebooks/connect`.
+3. Tap **Open official NotebookLM**.
+4. Sign in to Google in the official top-level browser page.
+5. Return to Google Nexus.
+6. Tap **Refresh status** / **Check connection**.
+7. If the server-side NotebookLM integration is configured, the Bridge can use it. If it is not configured, the page clearly reports that the browser login did not transfer a server credential.
+
+No Mac, Terminal, VM, Docker container, or manual cookie/token copying is required by the iPad UI.
+
+## Server configuration
+
+Required for the current `notebooklm-py` web API:
+
+- `SUPABASE_URL` (or the existing Vite Supabase URL)
+- `SUPABASE_ANON_KEY` (or the existing Vite Supabase publishable key)
+- `NOTEBOOKLM_MASTER_TOKEN_JSON`
+
+`NOTEBOOKLM_MASTER_TOKEN_JSON` is a highly privileged server credential. Keep it in Vercel Environment Variables as a sensitive server-side secret. Never commit or expose it.
+
+The repository's `requirements.txt` pins `notebooklm-py[headless]==0.8.2`.
 
 ## Security rules
 
-- Never commit `master_token.json`.
-- Never commit `storage_state.json`.
-- Never commit OAuth state, OAuth passwords, MCP tokens, tunnel tokens, or VM credentials.
+- Never extract Google cookies from the iPad browser.
+- Never return NotebookLM credentials to frontend code.
 - Never put NotebookLM credentials in `VITE_*` variables.
-- Never expose the MCP container port directly to the Internet.
-- Keep the deployment single-tenant.
-- Use HTTPS at the tunnel edge.
-- Treat the master token as a full-account credential.
+- Never commit `master_token.json` or `storage_state.json`.
+- Never spoof or bypass Google anti-automation/security controls.
+- Treat `NOTEBOOKLM_MASTER_TOKEN_JSON` as a full-account credential.
+- Keep consumer NotebookLM and Gemini Notebook Enterprise credentials/configuration separate.
 
-## Current state
+## Enterprise path
 
-Implemented in the repository:
+If this account is actually using Gemini Notebook Enterprise, the official Google API is a much cleaner long-term adapter. Google documents API operations for notebooks and sources and requires Google Cloud authentication plus the appropriate enterprise setup. citeturn2view0turn0search1
 
-- persistent remote MCP deployment architecture;
-- VM deployment runbook;
-- separation of long-running MCP service from the Vercel/Supabase web application;
-- compatibility notes for ChatGPT OAuth;
-- retention of the existing authenticated REST bridge.
-
-Still external to GitHub:
-
-- the persistent VM;
-- one-time master-token bootstrap and secure transfer;
-- Cloudflare/Tailscale tunnel configuration;
-- OAuth password and public hostname;
-- final ChatGPT connector registration.
+That adapter should be implemented as a separate provider rather than silently treating an Enterprise notebook as a consumer NotebookLM notebook.
