@@ -35,10 +35,10 @@ jobs:
           version: latest
 
       - name: Link Supabase project
-        run: supabase link --project-ref "$SUPABASE_PROJECT_ID" --password "$SUPABASE_DB_PASSWORD"
+        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
 
       - name: Deploy database migrations
-        run: supabase db push
+        run: supabase db push --password "$SUPABASE_DB_PASSWORD"
 
   deploy-functions:
     runs-on: ubuntu-latest
