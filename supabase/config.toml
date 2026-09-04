@@ -1,13 +1,12 @@
 project_id = "bjamfhlopmawtnzwwicu"
 
-# steel-login is called straight from the browser and does its own
-# JWT verification (requireUser) inside the handler. Platform-level JWT
-# verification has to be off so CORS preflight (OPTIONS, no Authorization
-# header) isn't rejected before the function ever runs.
+# These functions verify Supabase JWTs inside the handler so CORS preflight
+# (OPTIONS, no Authorization header) is not rejected before the function runs.
 [functions.steel-login]
 verify_jwt = false
 
-# The proxy also verifies the Supabase JWT itself so it can handle CORS
-# preflight before authentication and keep the upstream service token private.
 [functions.notebooklm-proxy]
+verify_jwt = false
+
+[functions.notebooklm-browser-gateway]
 verify_jwt = false
