@@ -90,8 +90,6 @@ def _with_profile(callback):
         profile = Path(tmp)
         (profile / "master_token.json").write_text(json.dumps(token), encoding="utf-8")
         os.chmod(profile / "master_token.json", 0o600)
-        # notebooklm-py documents this transaction: the durable master token sits
-        # beside storage_state.json and auth refresh mints a fresh web session.
         _run_nlm(["auth", "refresh", "--verify"], profile, timeout=20)
         return callback(profile)
 
@@ -120,8 +118,6 @@ def _execute(action, data, profile):
     notebook_id = data.get("notebookId", "")
     source_id = data.get("sourceId", "")
 
-    if action == "health":
-        return {"ok": True, "configured": bool(_env("NOTEBOOKLM_MASTER_TOKEN_JSON")), "provider": "notebooklm-py"}
     if action == "list":
         return _run_nlm(["list", "notebooks", "--json"], profile)
     if action == "get":
@@ -158,6 +154,16 @@ class handler(BaseHTTPRequestHandler):
             _require_auth(self)
             params = _query(self)
             action = params.get("action", "health")
+            if action == "health":
+                configured = bool(_env("NOTEBOOKLM_MASTER_TOKEN_JSON"))
+                _json(self, 200, {
+                    "ok": True,
+                    "configured": configured,
+                    "provider": "notebooklm-py",
+                    "authMode": "server-master-token" if configured else "not-configured",
+                    "officialLoginDoesNotTransferSession": True,
+                })
+                return
             result = _with_profile(lambda profile: _execute(action, params, profile))
             _json(self, 200, {"ok": True, "data": result})
         except PermissionError as exc:
@@ -172,6 +178,16 @@ class handler(BaseHTTPRequestHandler):
             action = str(data.pop("action", "")).strip()
             if not action:
                 raise ValueError("Missing action.")
+            if action == "health":
+                configured = bool(_env("NOTEBOOKLM_MASTER_TOKEN_JSON"))
+                _json(self, 200, {
+                    "ok": True,
+                    "configured": configured,
+                    "provider": "notebooklm-py",
+                    "authMode": "server-master-token" if configured else "not-configured",
+                    "officialLoginDoesNotTransferSession": True,
+                })
+                return
             result = _with_profile(lambda profile: _execute(action, data, profile))
             _json(self, 200, {"ok": True, "data": result})
         except PermissionError as exc:
