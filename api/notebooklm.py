@@ -2,8 +2,10 @@ import json
 import os
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from urllib.parse import parse_qs
 from http.server import BaseHTTPRequestHandler
 
 
@@ -27,29 +29,85 @@ def _env(*names):
     return ""
 
 
-def _supabase_user(token):
-    """Validate the user's Supabase JWT without exposing service-role credentials."""
-    import urllib.request
+def _request_json(url, method="GET", body=None, headers=None, timeout=10):
+    request = urllib.request.Request(
+        url,
+        method=method,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+            return response.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {"error": raw}
+        return exc.code, data
 
+
+def _supabase_user(token):
+    """Validate the user's Supabase JWT without exposing service credentials."""
     base = _env("SUPABASE_URL", "VITE_SUPABASE_URL").rstrip("/")
     anon = _env("SUPABASE_ANON_KEY", "VITE_SUPABASE_ANON_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY")
     if not base or not anon or not token:
         return None
-    request = urllib.request.Request(
+    status, data = _request_json(
         f"{base}/auth/v1/user",
         headers={"apikey": anon, "Authorization": f"Bearer {token}"},
+        timeout=8,
     )
+    return data if status == 200 and isinstance(data, dict) and data.get("id") else None
+
+
+def _service_headers():
+    service = _env("SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_ROLE_KEY")
+    if not service:
+        raise RuntimeError("Supabase server secret key is not configured.")
+    return {"apikey": service, "Authorization": f"Bearer {service}"}
+
+
+def _rpc(name, args):
+    base = _env("SUPABASE_URL", "VITE_SUPABASE_URL").rstrip("/")
+    if not base:
+        raise RuntimeError("SUPABASE_URL is not configured.")
+    status, data = _request_json(
+        f"{base}/rest/v1/rpc/{name}",
+        method="POST",
+        body=args,
+        headers=_service_headers(),
+        timeout=10,
+    )
+    if status < 200 or status >= 300:
+        message = data.get("message") or data.get("hint") or data.get("error") or f"RPC failed ({status})"
+        raise RuntimeError(str(message))
+    return data
+
+
+def _master_token(user_id):
+    """Load a per-user master-token JSON object from Supabase Vault.
+
+    The legacy environment variable remains a compatibility fallback, but a
+    normal iPad login stores the credential in Vault and never requires the
+    user to paste it into Vercel.
+    """
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            return json.loads(response.read().decode("utf-8"))
+        value = _rpc("vault_read_notebooklm_master_token", {"p_user_id": user_id})
+        if isinstance(value, str) and value.strip():
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
     except Exception:
-        return None
+        # Preserve the legacy env-var path for existing deployments while the
+        # Vault migration is being rolled out.
+        pass
 
-
-def _master_token():
     value = _env("NOTEBOOKLM_MASTER_TOKEN_JSON")
     if not value:
-        raise RuntimeError("NotebookLM server authentication is not configured.")
+        raise RuntimeError("NotebookLM is not connected yet. Use the iPad login flow first.")
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
@@ -84,13 +142,14 @@ def _run_nlm(args, profile_dir, timeout=50):
     return {"ok": True}
 
 
-def _with_profile(callback):
-    token = _master_token()
+def _with_profile(user_id, callback):
+    token = _master_token(user_id)
     with tempfile.TemporaryDirectory(prefix="notebooklm-") as tmp:
         profile = Path(tmp)
-        (profile / "master_token.json").write_text(json.dumps(token), encoding="utf-8")
-        os.chmod(profile / "master_token.json", 0o600)
-        _run_nlm(["auth", "refresh", "--verify"], profile, timeout=20)
+        token_path = profile / "master_token.json"
+        token_path.write_text(json.dumps(token, separators=(",", ":")), encoding="utf-8")
+        os.chmod(token_path, 0o600)
+        _run_nlm(["auth", "refresh", "--verify"], profile, timeout=25)
         return callback(profile)
 
 
@@ -105,7 +164,7 @@ def _require_auth(handler):
 
 
 def _query(handler):
-    return {key: values[-1] for key, values in parse_qs(handler.path.partition("?")[2]).items()}
+    return {key: values[-1] for key, values in urllib.parse.parse_qs(handler.path.partition("?")[2]).items()}
 
 
 def _body(handler):
@@ -145,26 +204,30 @@ def _execute(action, data, profile):
     raise ValueError(f"Unsupported NotebookLM action: {action}")
 
 
+def _health(user_id):
+    try:
+        status = _rpc("vault_notebooklm_connection_status", {"p_user_id": user_id})
+        if status and isinstance(status, dict) and status.get("status") == "connected":
+            return {"ok": True, "configured": True, "provider": "notebooklm-py", "authMode": "vault-master-token", "officialLoginDoesNotTransferSession": False}
+    except Exception:
+        pass
+    configured = bool(_env("NOTEBOOKLM_MASTER_TOKEN_JSON"))
+    return {"ok": True, "configured": configured, "provider": "notebooklm-py", "authMode": "server-master-token" if configured else "not-configured", "officialLoginDoesNotTransferSession": True}
+
+
 class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         _json(self, 204, {})
 
     def do_GET(self):
         try:
-            _require_auth(self)
+            user = _require_auth(self)
             params = _query(self)
             action = params.get("action", "health")
             if action == "health":
-                configured = bool(_env("NOTEBOOKLM_MASTER_TOKEN_JSON"))
-                _json(self, 200, {
-                    "ok": True,
-                    "configured": configured,
-                    "provider": "notebooklm-py",
-                    "authMode": "server-master-token" if configured else "not-configured",
-                    "officialLoginDoesNotTransferSession": True,
-                })
+                _json(self, 200, _health(user["id"]))
                 return
-            result = _with_profile(lambda profile: _execute(action, params, profile))
+            result = _with_profile(user["id"], lambda profile: _execute(action, params, profile))
             _json(self, 200, {"ok": True, "data": result})
         except PermissionError as exc:
             _json(self, 401, {"ok": False, "error": str(exc)})
@@ -173,22 +236,15 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            _require_auth(self)
+            user = _require_auth(self)
             data = _body(self)
             action = str(data.pop("action", "")).strip()
             if not action:
                 raise ValueError("Missing action.")
             if action == "health":
-                configured = bool(_env("NOTEBOOKLM_MASTER_TOKEN_JSON"))
-                _json(self, 200, {
-                    "ok": True,
-                    "configured": configured,
-                    "provider": "notebooklm-py",
-                    "authMode": "server-master-token" if configured else "not-configured",
-                    "officialLoginDoesNotTransferSession": True,
-                })
+                _json(self, 200, _health(user["id"]))
                 return
-            result = _with_profile(lambda profile: _execute(action, data, profile))
+            result = _with_profile(user["id"], lambda profile: _execute(action, data, profile))
             _json(self, 200, {"ok": True, "data": result})
         except PermissionError as exc:
             _json(self, 401, {"ok": False, "error": str(exc)})
