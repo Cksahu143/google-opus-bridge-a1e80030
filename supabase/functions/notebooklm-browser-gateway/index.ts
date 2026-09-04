@@ -164,7 +164,7 @@ async function startLogin(userId: string) {
     const result = await runBrowserlessBql(session.browserQL, `
       mutation OpenNotebookLM {
         goto(url: "https://notebooklm.google.com/", waitUntil: domContentLoaded) { status }
-        liveURL(timeout: 300000, interactable: true, resizable: true, showBrowserInterface: false) { liveURL }
+        liveURL(timeout: 120000, interactable: true, resizable: true, showBrowserInterface: false) { liveURL }
       }
     `);
     return {
