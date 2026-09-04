@@ -9,7 +9,7 @@ export const Route = createFileRoute("/notebooks/connect")({
   head: () => ({
     meta: [
       { title: "Connect NotebookLM · Google Nexus" },
-      { name: "description", content: "Connect Google Nexus to NotebookLM with an iPad-first, security-aware flow." },
+      { name: "description", content: "Connect NotebookLM to Google Nexus with an iPad-first login flow." },
     ],
   }),
   component: ConnectNotebookLmPage,
@@ -18,7 +18,15 @@ export const Route = createFileRoute("/notebooks/connect")({
 const SUPABASE_FUNCTIONS_URL =
   (import.meta.env["VITE_SUPABASE_FUNCTIONS_URL"] as string | undefined) ??
   `${(import.meta.env["VITE_SUPABASE_URL"] as string | undefined) ?? ""}/functions/v1`;
-const NOTEBOOKLM_URL = "https://notebooklm.google.com/";
+const NOTEBOOKLM_LOGIN_API = "/api/notebooklm-login";
+
+type LoginState =
+  | { step: "idle" }
+  | { step: "starting" }
+  | { step: "waiting"; liveUrl: string; expiresAt?: string }
+  | { step: "finishing" }
+  | { step: "connected"; email?: string }
+  | { step: "error"; message: string };
 
 type Provider = "auto" | "browserless" | "browserbase" | "steel" | "cloudflare";
 type State =
@@ -49,6 +57,8 @@ function ConnectNotebookLmPage() {
   const [state, setState] = useState<State>({ step: "checking" });
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealth | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState("");
+  const [loginState, setLoginState] = useState<LoginState>({ step: "idle" });
   const [provider, setProvider] = useState<Provider>("auto");
   const [toolState, setToolState] = useState<ToolState>({ kind: "idle" });
 
@@ -69,11 +79,11 @@ function ConnectNotebookLmPage() {
 
   async function checkService() {
     try {
-      const [gateway, notebooklm] = await Promise.all([
-        gatewayCall("health"),
-        notebooklmHealth(),
-      ]);
+      const [gateway, notebooklm] = await Promise.all([gatewayCall("health"), notebooklmHealth()]);
       setBridgeHealth(notebooklm);
+      if (notebooklm.configured && notebooklm.authMode === "vault-master-token") {
+        setLoginState({ step: "connected", email: userEmail || undefined });
+      }
       setState({ step: "ready", providers: gateway.providers });
     } catch (err) {
       setState({ step: "offline", message: String((err as Error)?.message ?? err) });
@@ -93,13 +103,63 @@ function ConnectNotebookLmPage() {
     return data;
   }
 
+  async function loginApi(action: "start" | "complete" | "disconnect") {
+    const headers = await authHeaders(true);
+    if (!headers.Authorization) throw new Error("Sign in to Google Nexus first.");
+    const response = await fetch(NOTEBOOKLM_LOGIN_API, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ action, email: userEmail }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok !== true) throw new Error(data.error || `NotebookLM login request failed (${response.status})`);
+    return data.data ?? data;
+  }
+
   useEffect(() => {
     void supabase.auth.getUser().then(({ data }) => {
       setUserId(data.user?.id ?? null);
+      setUserEmail(data.user?.email ?? "");
       void checkService();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function startIpadLogin() {
+    setLoginState({ step: "starting" });
+    try {
+      const data = await loginApi("start");
+      const liveUrl = typeof data?.liveUrl === "string" ? data.liveUrl : "";
+      if (!liveUrl) throw new Error("The login browser did not return a live URL.");
+      setLoginState({ step: "waiting", liveUrl, expiresAt: data?.expiresAt });
+      window.open(liveUrl, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setLoginState({ step: "error", message: String((err as Error)?.message ?? err) });
+    }
+  }
+
+  async function finishIpadLogin() {
+    setLoginState({ step: "finishing" });
+    try {
+      const data = await loginApi("complete");
+      setLoginState({ step: "connected", email: data?.email || userEmail || undefined });
+      const health = await notebooklmHealth();
+      setBridgeHealth(health);
+    } catch (err) {
+      setLoginState({ step: "error", message: String((err as Error)?.message ?? err) });
+    }
+  }
+
+  async function disconnectIpadLogin() {
+    setLoginState({ step: "starting" });
+    try {
+      await loginApi("disconnect");
+      setLoginState({ step: "idle" });
+      setBridgeHealth((current) => ({ ...current, configured: false, authMode: "not-configured" }));
+    } catch (err) {
+      setLoginState({ step: "error", message: String((err as Error)?.message ?? err) });
+    }
+  }
 
   async function runTool(tool: "health" | "start" | "stop") {
     setToolState({ kind: "running", tool });
@@ -122,7 +182,7 @@ function ConnectNotebookLmPage() {
       <div>
         <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">Google Nexus</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight text-foreground">Connect NotebookLM</h1>
-        <p className="mt-2 text-sm text-muted-foreground">iPad-first connection manager. No Mac, Terminal, VM, or credential copying is required by this screen.</p>
+        <p className="mt-2 text-sm text-muted-foreground">iPad-first. No Mac, Terminal, VM, local Python, or manual master-token copying.</p>
       </div>
 
       {state.step === "checking" && <p className="text-sm text-muted-foreground">Checking NotebookLM and browser-gateway status…</p>}
@@ -140,28 +200,49 @@ function ConnectNotebookLmPage() {
       {state.step === "ready" && (
         <div className="space-y-4">
           <div className="rounded-lg border border-border p-5">
-            <p className="text-sm font-medium text-foreground">1. Sign in normally</p>
-            <p className="mt-1 text-sm text-muted-foreground">Open the official NotebookLM site in a normal top-level iPad browser and sign in there. Google authentication stays between you and Google.</p>
-            <Button type="button" className="mt-4" onClick={() => window.open(NOTEBOOKLM_URL, "_blank", "noopener,noreferrer")}>Open official NotebookLM</Button>
+            <p className="text-sm font-medium text-foreground">1. One-time iPad login</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              This follows the same high-level flow used by notebooklm-py: Google EmbeddedSetup login produces a one-time authorization value; the server exchanges it for the durable NotebookLM master credential and stores that credential in Supabase Vault. The credential never comes back to this iPad.
+            </p>
+            <label htmlFor="google-email" className="mt-4 block text-xs font-medium text-muted-foreground">Google account email</label>
+            <input id="google-email" value={userEmail} onChange={(event) => setUserEmail(event.target.value)} placeholder="you@gmail.com" inputMode="email" autoComplete="email" className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground" />
+            <Button type="button" className="mt-4" onClick={() => void startIpadLogin()} disabled={!userEmail.includes("@")}>
+              {loginState.step === "starting" ? "Starting secure login…" : "Start iPad NotebookLM login"}
+            </Button>
+
+            {loginState.step === "waiting" && (
+              <div className="mt-4 rounded-md bg-muted p-4">
+                <p className="text-sm font-medium text-foreground">Sign in in the remote browser</p>
+                <p className="mt-1 text-xs text-muted-foreground">Complete the Google sign-in there. When it finishes, close the remote-browser tab and come back here.</p>
+                <a className="mt-3 inline-block text-sm font-medium underline" href={loginState.liveUrl} target="_blank" rel="noreferrer">Re-open the Google login browser</a>
+                <Button type="button" className="mt-4" onClick={() => void finishIpadLogin()}>I finished signing in — save connection</Button>
+              </div>
+            )}
+
+            {loginState.step === "finishing" && <p className="mt-4 text-sm text-muted-foreground">Finishing login and verifying the NotebookLM credential…</p>}
+            {loginState.step === "connected" && (
+              <div className="mt-4 rounded-md border border-border bg-muted p-4">
+                <p className="text-sm font-medium text-foreground">✓ NotebookLM connected</p>
+                <p className="mt-1 text-xs text-muted-foreground">{loginState.email || userEmail}. The master credential is stored server-side in Supabase Vault and is not displayed.</p>
+                <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => void disconnectIpadLogin()}>Disconnect NotebookLM</Button>
+              </div>
+            )}
+            {loginState.step === "error" && <p role="alert" className="mt-4 text-xs text-destructive">{loginState.message}</p>}
           </div>
 
           <div className="rounded-lg border border-border p-5">
             <p className="text-sm font-medium text-foreground">2. Bridge authentication status</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {bridgeHealth?.configured
-                ? "The server-side NotebookLM integration is configured. Its credential stays on the server and is never returned to the iPad."
-                : "The server-side NotebookLM integration is not configured yet. Signing into the official site does not automatically transfer Google cookies or tokens into the Bridge."}
-            </p>
+            <p className="mt-1 text-sm text-muted-foreground">{bridgeHealth?.configured ? "The server can now mint fresh NotebookLM web cookies from the stored master credential." : "Not connected yet. The official NotebookLM site login by itself does not transfer browser credentials to the Bridge."}</p>
             <div className="mt-3 rounded-md bg-muted p-3 text-xs">
-              <p><span className="font-medium">Bridge:</span> {bridgeHealth?.configured ? "configured" : "not configured"}</p>
+              <p><span className="font-medium">Bridge:</span> {bridgeHealth?.configured ? "connected" : "not connected"}</p>
               <p className="mt-1"><span className="font-medium">Auth mode:</span> {bridgeHealth?.authMode || "unknown"}</p>
             </div>
-            <p className="mt-3 text-xs text-muted-foreground">We intentionally do not extract Google session cookies, bearer tokens, or other account credentials from the browser.</p>
+            <p className="mt-3 text-xs text-muted-foreground">The raw master credential, Google password, and browser cookies are never rendered in this UI.</p>
           </div>
 
           <div className="rounded-lg border border-border p-5">
-            <p className="text-sm font-medium text-foreground">3. Browser providers are separate</p>
-            <p className="mt-1 text-sm text-muted-foreground">Remote browser sessions can be used for testing, but they are not presented as a way to bypass Google's authentication protections.</p>
+            <p className="text-sm font-medium text-foreground">3. Optional remote-browser testing</p>
+            <p className="mt-1 text-sm text-muted-foreground">These provider sessions are separate from the one-time master-token bootstrap. They are for browser testing and do not bypass Google's authentication protections.</p>
             {providers && (
               <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {(Object.keys(PROVIDER_LABELS) as Array<Exclude<Provider, "auto">>).map((name) => (
