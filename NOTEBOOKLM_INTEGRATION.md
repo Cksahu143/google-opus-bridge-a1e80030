@@ -1,94 +1,128 @@
-# NotebookLM Integration — Design & Implementation Status
+# NotebookLM Integration — Persistent Remote MCP
 
-Status: **BRIDGE IMPLEMENTED; DEPLOYMENT/NETWORK SETUP REQUIRED**
+Status: **REMOTE MCP ARCHITECTURE READY; CLOUD VM + ONE-TIME AUTH BOOTSTRAP REQUIRED**
 
-The Bridge now has an authenticated Supabase Edge Function proxy and a NotebookLM connection page that talks to a real `notebooklm-py` / `notebooklm-server` service. The remaining work is operational: the trusted machine must be authenticated, the REST service must be running, and Supabase must be able to reach it through a secure HTTPS endpoint.
+The Bridge is now designed so the long-running NotebookLM MCP service does **not** depend on the user's Mac being online. The durable service runs on a persistent Linux VM using the maintained `notebooklm-py` remote MCP deployment. The Mac is only needed for the one-time Google/NotebookLM master-token bootstrap.
 
-## Reference implementation
-
-Built on [teng-lin/notebooklm-py](https://github.com/teng-lin/notebooklm-py) (MIT, unofficial). It uses NotebookLM's undocumented web/RPC behavior rather than an official public consumer NotebookLM API. Google can change those endpoints without notice, so the integration must remain isolated behind this adapter.
-
-## Current architecture
+## Architecture
 
 ```text
-User browser
-   ↓ authenticated Supabase session
-Bridge frontend: /notebooks/connect
-   ↓ HTTPS + Supabase JWT
-Supabase Edge Function: notebooklm-proxy
-   ↓ server-side NOTEBOOKLM_SERVER_TOKEN
-Private HTTPS endpoint / reverse proxy
-   ↓
-notebooklm-server on trusted machine
-   ↓ local Playwright/browser session
-Real NotebookLM account
+                         ┌─────────────────────┐
+                         │ ChatGPT / Claude     │
+                         │ remote MCP client    │
+                         └──────────┬──────────┘
+                                    │
+                              HTTPS /mcp
+                              OAuth
+                                    │
+                         ┌──────────▼──────────┐
+                         │ Cloudflare/Tailscale │
+                         │ tunnel                │
+                         └──────────┬──────────┘
+                                    │
+                         ┌──────────▼──────────┐
+                         │ Persistent Linux VM  │
+                         │ Docker               │
+                         │ notebooklm-mcp       │
+                         └──────────┬──────────┘
+                                    │
+                         master-token auth
+                                    │
+                         ┌──────────▼──────────┐
+                         │ Consumer NotebookLM │
+                         └─────────────────────┘
+
+Bridge web UI:
+Browser → Supabase JWT → notebooklm-proxy → configured NotebookLM service
 ```
 
-The deployed Edge Function cannot use `localhost` or `127.0.0.1` to reach the user's Mac. The NotebookLM service therefore needs a reachable private HTTPS endpoint. See `docs/NOTEBOOKLM_SERVICE_DEPLOYMENT.md` for the exact setup.
+## Why this replaces the old Mac-server design
 
-## Authentication model
+The previous design required a trusted machine to keep `notebooklm-server` running and reachable. That was operationally fragile and meant the service disappeared when the Mac was asleep or offline.
 
-- Run `notebooklm login` on the trusted machine.
-- Complete Google sign-in in the real browser window.
-- Keep the resulting NotebookLM session state on that machine.
-- Do not send Google passwords, cookies, or `storage_state.json` to the Bridge.
-- `NOTEBOOKLM_SERVER_TOKEN` authenticates the service-to-proxy hop and is stored only as a server-side secret.
+The new design moves the durable NotebookLM process to a persistent VM. The VM runs Docker continuously and exposes the MCP endpoint through a secure HTTPS tunnel. The repository contains the deployment documentation under `deploy/notebooklm-mcp/` but does not contain credentials or provider-specific secrets.
 
-## Implemented Bridge pieces
+## Upstream implementation
 
-### Supabase Edge Function
+The remote MCP runtime is intentionally based on the maintained `teng-lin/notebooklm-py` deployment rather than a forked implementation. Its current deployment provides a prebuilt Docker image, persistent profile support, Cloudflare/Tailscale tunnel options, and self-hosted OAuth for ChatGPT.
 
-`supabase/functions/notebooklm-proxy/index.ts`:
+Reference: https://github.com/teng-lin/notebooklm-py/tree/main/deploy
 
-- verifies the signed-in user's Supabase JWT;
-- keeps `NOTEBOOKLM_SERVER_TOKEN` server-side;
-- exposes a narrow allowlist of NotebookLM notebook/source/chat REST routes;
-- provides an authenticated `/health` check mapped to the service's `/healthz`;
-- forwards upstream status and response bodies without exposing the service credential.
+## Authentication
 
-### Connection UI
+The recommended unattended path is the upstream master-token flow:
 
-`src/routes/notebooks/connect.tsx`:
+1. On a machine with a browser, run `notebooklm login --master-token` once.
+2. Transfer the resulting profile securely to the VM.
+3. The VM keeps the master token and writable session state on its private filesystem.
+4. `notebooklm-mcp` can refresh the web session without requiring a browser on the VM.
 
-- checks the authenticated proxy health;
-- clearly reports offline/configuration states;
-- provides a real `/v1/notebooks` test;
-- never receives the NotebookLM service bearer token;
-- tells the user to authenticate/run `notebooklm-server` on the trusted machine when required.
+This is deliberately **not** implemented as remote browser automation. The upstream project documents the master token as a durable, full-account credential and recommends a dedicated/throwaway Google account.
 
-## Remaining operational steps
+## ChatGPT connection
 
-1. Authenticate the trusted machine with `notebooklm login`.
-2. Start `notebooklm-server` with a strong `NOTEBOOKLM_SERVER_TOKEN`.
-3. Expose it through a private HTTPS/reverse-proxy boundary; never publish port 8000 directly.
-4. Set Supabase secrets `NOTEBOOKLM_BASE_URL` and `NOTEBOOKLM_SERVER_TOKEN`.
-5. Deploy `notebooklm-proxy`.
-6. Verify health, then verify `/v1/notebooks` through the Bridge.
+ChatGPT's custom MCP connector uses OAuth rather than a static bearer token. The remote deployment therefore needs:
 
-## Capability mapping
+- `NOTEBOOKLM_MCP_OAUTH_PASSWORD`
+- `NOTEBOOKLM_MCP_OAUTH_BASE_URL` set to the bare HTTPS origin
+- a public HTTPS tunnel whose whole host routes to the MCP server
 
-| Bridge operation | NotebookLM service operation |
-|---|---|
-| list notebooks | `GET /v1/notebooks` |
-| create notebook | `POST /v1/notebooks` |
-| get/update/delete notebook | `/v1/notebooks/{id}` |
-| suggested prompts | `/v1/notebooks/{id}/suggested-prompts` |
-| grounded chat | `POST /v1/notebooks/{id}/chat` |
-| chat configuration | `POST /v1/notebooks/{id}/chat/configure` |
-| URL/text/batch sources | `/v1/notebooks/{id}/sources/...` |
-| source content/update/delete | `/v1/notebooks/{id}/sources/{id}...` |
+The connector URL is:
 
-The Bridge intentionally does not become a general-purpose HTTP proxy.
+```text
+https://YOUR_HOSTNAME/mcp
+```
 
-## Existing Nexus notebooks
+The OAuth base URL must **not** include `/mcp`.
 
-The existing connector-managed `notebook.*` data is separate from the user's real NotebookLM account. There is no silent transparent migration. If migration is desired later, it should explicitly create real NotebookLM notebooks and re-add supported sources.
+Current OpenAI documentation says custom MCP apps/connectors are remote and that local MCP servers cannot be connected directly. Full write-capable MCP support is currently plan-dependent; Pro supports read/fetch MCP access while full MCP write/modify support is rolling out to Business, Enterprise and Edu. Verify the current plan requirements before relying on NotebookLM mutation tools.
 
-## Security boundary
+## Existing Supabase proxy
 
-- Never commit service tokens or Google session state.
-- Never put `NOTEBOOKLM_SERVER_TOKEN` in a `VITE_*` variable.
-- Never expose port 8000 directly to the public Internet.
-- Keep the NotebookLM service single-tenant unless a deliberate per-user credential architecture is added.
-- Treat NotebookLM cookies/storage state as live credentials.
-- If the NotebookLM session expires, re-run `notebooklm login` on the trusted machine.
+`supabase/functions/notebooklm-proxy/index.ts` remains an authenticated REST bridge for the existing web application. It is intentionally not the long-running MCP process.
+
+The proxy:
+
+- verifies the signed-in Supabase user;
+- keeps its upstream service credential server-side;
+- uses a narrow NotebookLM REST allowlist;
+- forwards query strings;
+- supports URL/text/file/batch source routes;
+- provides an authenticated `/health` check.
+
+The MCP deployment and the browser REST bridge should not run competing NotebookLM consumers against the same account/profile. The upstream project documents the account as single-consumer because concurrent session re-minting can invalidate sessions.
+
+## Deployment
+
+See `deploy/notebooklm-mcp/README.md` for the VM architecture and secure deployment contract.
+
+A cloud VM is an external infrastructure dependency. The GitHub repository cannot create or operate a persistent VM on its own. Oracle Cloud currently advertises Always Free compute capacity, subject to account, region, and capacity constraints; another persistent VM provider can be substituted without changing the MCP architecture.
+
+## Security rules
+
+- Never commit `master_token.json`.
+- Never commit `storage_state.json`.
+- Never commit OAuth state, OAuth passwords, MCP tokens, tunnel tokens, or VM credentials.
+- Never put NotebookLM credentials in `VITE_*` variables.
+- Never expose the MCP container port directly to the Internet.
+- Keep the deployment single-tenant.
+- Use HTTPS at the tunnel edge.
+- Treat the master token as a full-account credential.
+
+## Current state
+
+Implemented in the repository:
+
+- persistent remote MCP deployment architecture;
+- VM deployment runbook;
+- separation of long-running MCP service from the Vercel/Supabase web application;
+- compatibility notes for ChatGPT OAuth;
+- retention of the existing authenticated REST bridge.
+
+Still external to GitHub:
+
+- the persistent VM;
+- one-time master-token bootstrap and secure transfer;
+- Cloudflare/Tailscale tunnel configuration;
+- OAuth password and public hostname;
+- final ChatGPT connector registration.
