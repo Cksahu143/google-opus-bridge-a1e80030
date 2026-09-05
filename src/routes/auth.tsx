@@ -7,8 +7,7 @@ import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
 import { safeNext } from "@/lib/useSession";
 
-// Production OAuth must return to the Vercel deployment, not the old Lovable
-// preview. Keep this explicit so Supabase/Google never inherit a stale Site URL.
+// Keep production authentication on the canonical Vercel origin.
 const PRODUCTION_ORIGIN = "https://google-opus-bridge-a1e80030.vercel.app";
 
 function authOrigin() {
@@ -16,8 +15,8 @@ function authOrigin() {
   const hostname = window.location.hostname;
   // Local development should continue to use its own origin.
   if (hostname === "localhost" || hostname === "127.0.0.1") return window.location.origin;
-  // Production and Vercel preview deployments intentionally use the canonical
-  // production origin until their redirect URLs are explicitly allowlisted.
+  // Production and preview deployments use the canonical production origin
+  // until their redirect URLs are explicitly allowlisted.
   return PRODUCTION_ORIGIN;
 }
 
