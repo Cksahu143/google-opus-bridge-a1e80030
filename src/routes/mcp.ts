@@ -1,5 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-
 import { createMcpHandler } from "@/lib/mcp";
 
 export const Route = createFileRoute("/mcp")({
