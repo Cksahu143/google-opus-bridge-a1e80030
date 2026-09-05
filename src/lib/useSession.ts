@@ -10,19 +10,41 @@ export function useSession() {
 
   useEffect(() => {
     let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
+
+    try {
+      supabase.auth
+        .getSession()
+        .then(({ data }) => {
+          if (!active) return;
+          setSession(data.session);
+          setLoading(false);
+        })
+        .catch((error) => {
+          console.warn("Supabase session unavailable:", error);
+          if (active) {
+            setSession(null);
+            setLoading(false);
+          }
+        });
+
+      const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+        if (!active) return;
+        setSession(next);
+        setLoading(false);
+      });
+
+      return () => {
+        active = false;
+        sub.subscription.unsubscribe();
+      };
+    } catch (error) {
+      console.warn("Supabase session unavailable:", error);
+      setSession(null);
       setLoading(false);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
-      setSession(next);
-      setLoading(false);
-    });
-    return () => {
-      active = false;
-      sub.subscription.unsubscribe();
-    };
+      return () => {
+        active = false;
+      };
+    }
   }, []);
 
   return { session, loading, user: session?.user ?? null };
