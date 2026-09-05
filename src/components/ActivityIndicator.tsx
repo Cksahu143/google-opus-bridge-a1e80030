@@ -2,17 +2,6 @@ import { useEffect, useState } from "react";
 
 import { supabase } from "@/integrations/supabase/client";
 
-// Shows, in real time, when Claude (or this app's own dashboard buttons)
-// is running a Nexus capability -- backed by the activity_events table,
-// written by runCapability in router.server.ts. Subscribes via Supabase
-// Realtime's postgres_changes rather than polling, so it reflects the
-// actual start/finish moments, not a sampled approximation.
-//
-// Deliberately CSS-only for the pulse animation (transform/opacity via a
-// keyframe, respecting prefers-reduced-motion) rather than a JS animation
-// library -- see DESIGN_SYSTEM.md's decision framework: this is exactly
-// the "simple, decorative" case native CSS covers, no GSAP needed.
-
 interface ActivityEventRow {
   id: string;
   capability_id: string;
@@ -33,32 +22,46 @@ export function ActivityIndicator() {
   useEffect(() => {
     let channel: ReturnType<typeof supabase.channel> | null = null;
     let fadeTimeout: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
-    supabase.auth.getUser().then(({ data }) => {
-      const userId = data.user?.id;
-      if (!userId) return;
+    // This is optional UI. A missing browser Supabase configuration must not
+    // crash the entire root route before the app can show its setup guidance.
+    try {
+      void supabase.auth
+        .getUser()
+        .then(({ data }) => {
+          if (cancelled) return;
+          const userId = data.user?.id;
+          if (!userId) return;
 
-      channel = supabase
-        .channel(`activity-events-${userId}`)
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "activity_events", filter: `user_id=eq.${userId}` },
-          (payload) => {
-            const row = (payload.new ?? payload.old) as ActivityEventRow | undefined;
-            if (!row) return;
-            setEvent(row);
-            if (fadeTimeout) clearTimeout(fadeTimeout);
-            if (row.status !== "running") {
-              fadeTimeout = setTimeout(() => setEvent(null), FADE_OUT_AFTER_MS);
-            }
-          },
-        )
-        .subscribe();
-    });
+          channel = supabase
+            .channel(`activity-events-${userId}`)
+            .on(
+              "postgres_changes",
+              { event: "*", schema: "public", table: "activity_events", filter: `user_id=eq.${userId}` },
+              (payload) => {
+                const row = (payload.new ?? payload.old) as ActivityEventRow | undefined;
+                if (!row) return;
+                setEvent(row);
+                if (fadeTimeout) clearTimeout(fadeTimeout);
+                if (row.status !== "running") {
+                  fadeTimeout = setTimeout(() => setEvent(null), FADE_OUT_AFTER_MS);
+                }
+              },
+            )
+            .subscribe();
+        })
+        .catch((error) => {
+          console.warn("Activity indicator unavailable:", error);
+        });
+    } catch (error) {
+      console.warn("Activity indicator unavailable:", error);
+    }
 
     return () => {
+      cancelled = true;
       if (fadeTimeout) clearTimeout(fadeTimeout);
-      if (channel) supabase.removeChannel(channel);
+      if (channel) void supabase.removeChannel(channel);
     };
   }, []);
 
