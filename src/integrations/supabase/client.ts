@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
+import { getSupabasePublicConfig } from './publicConfig';
 
 function isNewSupabaseApiKey(value: string): boolean {
   return value.startsWith('sb_publishable_') || value.startsWith('sb_secret_');
@@ -26,19 +27,19 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 }
 
 function createSupabaseClient() {
-  // Browser configuration comes only from Vite-exposed public variables.
-  // Server secrets must never be read by this client.
-  const SUPABASE_URL = import.meta.env['VITE_SUPABASE_URL'];
-  const SUPABASE_PUBLISHABLE_KEY =
-    import.meta.env['VITE_SUPABASE_PUBLISHABLE_KEY'] ||
-    import.meta.env['VITE_SUPABASE_ANON_KEY'];
+  // Prefer Vercel/Vite public environment variables, with a safe public
+  // linked-project fallback so a deployment is not dependent on platform
+  // specific environment injection.
+  const config = getSupabasePublicConfig();
+  const SUPABASE_URL = config.url;
+  const SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
 
   if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
     const missing = [
       ...(!SUPABASE_URL ? ['VITE_SUPABASE_URL'] : []),
       ...(!SUPABASE_PUBLISHABLE_KEY ? ['VITE_SUPABASE_PUBLISHABLE_KEY / VITE_SUPABASE_ANON_KEY'] : []),
     ];
-    const message = `Missing browser Supabase configuration: ${missing.join(', ')}. Configure these Vite public variables in the Vercel deployment.`;
+    const message = `Missing browser Supabase configuration: ${missing.join(', ')}. Configure these public variables in the Vercel deployment.`;
     console.error(`[Supabase] ${message}`);
     throw new Error(message);
   }
@@ -48,8 +49,8 @@ function createSupabaseClient() {
       fetch: createSupabaseFetch(SUPABASE_PUBLISHABLE_KEY),
     },
     auth: {
-      // Supabase's standard browser storage is localStorage. The old Lovable
-      // preview postMessage broker is intentionally not used on Vercel.
+      // Standard Supabase browser persistence uses localStorage. No preview
+      // broker or platform-specific auth bridge is required on Vercel.
       persistSession: true,
       autoRefreshToken: true,
     },
