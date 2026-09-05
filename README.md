@@ -342,21 +342,17 @@ The connector infrastructure is the product.
 
 Research first, build the strongest architecture you can find, and make every important component genuinely functional rather than simulated.
 
-This project was built with [Lovable](https://lovable.dev).
+## Deployment
 
-**Live app**: https://google-opus-bridge.lovable.app
+Production is hosted on Vercel:
 
-## Build with Lovable
+https://google-opus-bridge-a1e80030.vercel.app
 
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/3ad3bdaa-2f4e-4d12-a1aa-4b3f6b435b5b).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
+The frontend uses Vite-exposed public Supabase configuration, while server-only credentials remain in the deployment environment.
 
 ## Development
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+The project uses Vite, TanStack Start, React, Tailwind CSS and Supabase.
 
 ```sh
 git clone <this-repository-url>
