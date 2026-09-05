@@ -39,8 +39,6 @@ function AuthPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Supabase reports failed OAuth redirects in the URL hash. Without this the
-  // user is bounced back to a plain sign-in page with no explanation.
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
     const description = hash.get("error_description") ?? hash.get("error");
@@ -49,74 +47,83 @@ function AuthPage() {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
       return;
     }
-    // Successful OAuth returns here with a session; continue to the destination.
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) window.location.replace(next);
-    });
-  }, [next]);
 
+    try {
+      void supabase.auth
+        .getSession()
+        .then(({ data }) => {
+          if (data.session) window.location.replace(next);
+        })
+        .catch((sessionError) => {
+          console.warn("Supabase auth unavailable:", sessionError);
+          setError("Gateway sign-in is not configured yet. The Vercel deployment needs its browser Supabase variables.");
+        });
+    } catch (sessionError) {
+      console.warn("Supabase auth unavailable:", sessionError);
+      setError("Gateway sign-in is not configured yet. The Vercel deployment needs its browser Supabase variables.");
+    }
+  }, [next]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     setMessage(null);
-    if (mode === "signin") {
-      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    try {
+      if (mode === "signin") {
+        const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+        if (signInError) return setError(signInError.message);
+        window.location.href = next;
+        return;
+      }
+      const { error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: `${window.location.origin}${next}` },
+      });
+      if (signUpError) return setError(signUpError.message);
+      setMessage("Account created. Check your email if confirmation is required, then sign in.");
+      setMode("signin");
+    } catch (submitError) {
+      console.warn("Supabase auth unavailable:", submitError);
+      setError("Gateway sign-in is not configured yet. Configure the browser Supabase variables in Vercel and redeploy.");
+    } finally {
       setBusy(false);
-      if (signInError) return setError(signInError.message);
-      window.location.href = next;
-      return;
     }
-    const { error: signUpError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { emailRedirectTo: `${window.location.origin}${next}` },
-    });
-    setBusy(false);
-    if (signUpError) return setError(signUpError.message);
-    setMessage("Account created. Check your email if confirmation is required, then sign in.");
-    setMode("signin");
   }
 
   async function google() {
     setBusy(true);
     setError(null);
-    // External (self-managed) Supabase project: use Supabase Auth directly.
-    const { error: oauthError } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: `${window.location.origin}/auth?next=${encodeURIComponent(next)}`,
-        queryParams: { prompt: "select_account" },
-      },
-    });
-    if (oauthError) {
+    try {
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${window.location.origin}/auth?next=${encodeURIComponent(next)}`,
+          queryParams: { prompt: "select_account" },
+        },
+      });
+      if (oauthError) setError(oauthError.message);
+    } catch (oauthError) {
+      console.warn("Supabase OAuth unavailable:", oauthError);
+      setError("Google sign-in is not configured yet. Configure the browser Supabase variables in Vercel and redeploy.");
+    } finally {
       setBusy(false);
-      setError(oauthError.message);
     }
   }
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-4 py-16">
       <div className="w-full max-w-sm">
-        <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">
-          Google Nexus
-        </p>
+        <p className="font-mono text-xs uppercase tracking-[0.3em] text-muted-foreground">Google Nexus</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight text-foreground">
           {mode === "signin" ? "Sign in to the gateway" : "Create your gateway account"}
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          This account owns the gateway. The Google account Claude uses is connected separately in
-          the next step.
+          This account owns the gateway. The Google account Claude uses is connected separately in the next step.
         </p>
 
-        <Button
-          type="button"
-          variant="outline"
-          className="mt-6 w-full"
-          disabled={busy}
-          onClick={google}
-        >
+        <Button type="button" variant="outline" className="mt-6 w-full" disabled={busy} onClick={google}>
           Continue with Google
         </Button>
 
@@ -129,32 +136,13 @@ function AuthPage() {
         <form className="space-y-4" onSubmit={submit}>
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-            />
+            <Input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
           </div>
           <div className="space-y-2">
             <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete={mode === "signin" ? "current-password" : "new-password"}
-              required
-              minLength={8}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
+            <Input id="password" type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} required minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} />
           </div>
-          {error && (
-            <p role="alert" className="text-sm text-destructive">
-              {error}
-            </p>
-          )}
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           {message && <p className="text-sm text-muted-foreground">{message}</p>}
           <Button type="submit" className="w-full" disabled={busy}>
             {mode === "signin" ? "Sign in" : "Create account"}
