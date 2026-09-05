@@ -14,7 +14,6 @@ export default defineConfig({
   plugins: [
     tailwindcss(),
     tanstackStart({
-      // Keep the project's explicit SSR server entry without depending on Lovable's config wrapper.
       server: { entry: "server" },
     }),
     // TanStack Start must run before the React plugin.
