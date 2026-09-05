@@ -2,25 +2,18 @@
 //
 // SUPERSEDED / NOT IN USE.
 //
-// This file was an earlier proposal to wrap the whole app as a native iPad
-// app. That is NOT what's being built — the actual requirement is just
-// making NotebookLM login work when the existing web app is opened on an
-// iPad's Safari, which is solved instead by /notebooks/connect.tsx +
-// login-service (Browserbase-based remote-browser login, embedded via a
-// plain <iframe>). No native wrapper, no App Store, no Xcode build needed.
-//
-// Left in place only for reference/history — safe to delete this file.
-// The @capacitor/* packages referenced below were never installed and
-// should not be added.
+// The project is deployed as a web application on Vercel and does not require
+// a native iPad wrapper, App Store package, or Xcode build. This file remains
+// only as historical configuration and is not part of the Vercel deployment.
 
 import type { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
   appId: "com.charukrishna.googleopusbridge",
-  appName: "Google Opus Bridge",
+  appName: "Google Nexus",
   webDir: "dist",
   server: {
-    url: "https://google-opus-bridge.lovable.app",
+    url: "https://google-opus-bridge-a1e80030.vercel.app",
     cleartext: false,
   },
 };
