@@ -1,11 +1,9 @@
 /**
  * Browser-safe Supabase configuration for the linked project.
  *
- * Deployments outside the Lovable sandbox (for example the linked Vercel project)
- * do not receive the git-ignored `.env`, so `import.meta.env.VITE_SUPABASE_*` can
- * be empty in the production browser bundle. Everything here is PUBLIC data: the
- * project URL, project ref, and the publishable/anon key that ships in every
- * browser bundle anyway and is protected by Row Level Security.
+ * Vercel builds receive the public values through Vite environment variables.
+ * The linked-project fallback keeps the browser pointed at the same Supabase
+ * project if a deployment was built without those public variables.
  *
  * Never add the service-role key or any other secret to this file.
  */
@@ -35,7 +33,6 @@ function viteEnv(): EnvLike | undefined {
 }
 
 function nodeEnv(): EnvLike | undefined {
-  // `process.env` is `{}` in Vite client bundles and the real env on the server / SSR.
   try {
     return typeof process !== "undefined" ? (process.env as EnvLike) : undefined;
   } catch {
@@ -51,31 +48,41 @@ export type SupabasePublicConfig = {
   url: string;
   publishableKey: string;
   projectId: string;
-  /** "env" when the values came from build/runtime env, "fallback" when the linked-project constants were used. */
   source: "env" | "fallback";
 };
 
-/**
- * Resolve the public Supabase configuration, preferring environment values so a
- * deployment can still point at another project, but falling back to the linked
- * project's public settings when the bundle was built without them.
- */
+/** Resolve public Supabase settings, preferring deployment environment values. */
 export function getSupabasePublicConfig(): SupabasePublicConfig {
   const vite = viteEnv();
   const node = nodeEnv();
 
   const envUrl =
-    pick(vite, ["VITE_SUPABASE_URL", "SUPABASE_URL"]) ?? pick(node, ["SUPABASE_URL", "VITE_SUPABASE_URL"]);
+    pick(vite, ["VITE_SUPABASE_URL", "SUPABASE_URL"]) ??
+    pick(node, ["SUPABASE_URL", "VITE_SUPABASE_URL"]);
   const envKey =
-    pick(vite, ["VITE_SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_ANON_KEY", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY"]) ??
-    pick(node, ["SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_ANON_KEY"]);
+    pick(vite, [
+      "VITE_SUPABASE_PUBLISHABLE_KEY",
+      "VITE_SUPABASE_ANON_KEY",
+      "SUPABASE_PUBLISHABLE_KEY",
+      "SUPABASE_ANON_KEY",
+    ]) ??
+    pick(node, [
+      "SUPABASE_PUBLISHABLE_KEY",
+      "SUPABASE_ANON_KEY",
+      "VITE_SUPABASE_PUBLISHABLE_KEY",
+      "VITE_SUPABASE_ANON_KEY",
+    ]);
 
   const url = envUrl && looksLikeSupabaseUrl(envUrl) ? envUrl.replace(/\/+$/, "") : LINKED_SUPABASE_URL;
   const publishableKey = envKey ?? LINKED_SUPABASE_PUBLISHABLE_KEY;
 
   const envProjectId =
-    pick(vite, ["VITE_SUPABASE_PROJECT_ID", "SUPABASE_PROJECT_ID"]) ?? pick(node, ["SUPABASE_PROJECT_ID", "VITE_SUPABASE_PROJECT_ID"]);
-  const projectId = envProjectId ?? url.match(/^https?:\/\/([a-z0-9-]+)\.supabase\.(co|in|red)/i)?.[1] ?? LINKED_SUPABASE_PROJECT_ID;
+    pick(vite, ["VITE_SUPABASE_PROJECT_ID", "SUPABASE_PROJECT_ID"]) ??
+    pick(node, ["SUPABASE_PROJECT_ID", "VITE_SUPABASE_PROJECT_ID"]);
+  const projectId =
+    envProjectId ??
+    url.match(/^https?:\/\/([a-z0-9-]+)\.supabase\.(co|in|red)/i)?.[1] ??
+    LINKED_SUPABASE_PROJECT_ID;
 
   const source: SupabasePublicConfig["source"] = envUrl && envKey ? "env" : "fallback";
   return { url, publishableKey, projectId, source };
