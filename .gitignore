@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Lovable-generated metadata (legacy; do not add new files here)
+.lovable/
+
 # Logs
 logs
 *.log
