@@ -1,5 +1,14 @@
 project_id = "bjamfhlopmawtnzwwicu"
 
+# Hosted Supabase Authentication URL configuration must mirror these values.
+# The hosted project's dashboard settings remain authoritative in production.
+[auth]
+site_url = "https://google-opus-bridge-a1e80030.vercel.app"
+additional_redirect_urls = [
+  "https://google-opus-bridge-a1e80030.vercel.app/auth",
+  "http://localhost:3000/**",
+]
+
 # These functions verify Supabase JWTs inside the handler so CORS preflight
 # (OPTIONS, no Authorization header) is not rejected before the function runs.
 [functions.steel-login]
