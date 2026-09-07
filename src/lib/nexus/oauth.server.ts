@@ -11,8 +11,8 @@ const USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo";
 export const OAUTH_CALLBACK_PATH = "/api/public/google/callback";
 
 export function googleOAuthConfig() {
-  const clientId = process.env["GOOGLE_OAUTH_CLIENT_ID"];
-  const clientSecret = process.env["GOOGLE_OAUTH_CLIENT_SECRET"];
+  const clientId = process.env["GOOGLE_CLIENT_ID"];
+  const clientSecret = process.env["GOOGLE_CLIENT_SECRET"];
   return { clientId, clientSecret, configured: Boolean(clientId && clientSecret) };
 }
 
