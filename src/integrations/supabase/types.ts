@@ -491,12 +491,26 @@ export type Database = {
         }
         Returns: string
       }
+      vault_delete_google_tokens: {
+        Args: { p_user_id: string }
+        Returns: undefined
+      }
       vault_delete_secret_by_name: {
         Args: { secret_name: string }
         Returns: undefined
       }
+      vault_read_google_tokens: { Args: { p_user_id: string }; Returns: Json }
       vault_read_secret_by_name: {
         Args: { secret_name: string }
+        Returns: string
+      }
+      vault_upsert_google_tokens: {
+        Args: {
+          p_access_token: string
+          p_expires_at?: string
+          p_refresh_token?: string
+          p_user_id: string
+        }
         Returns: string
       }
     }
