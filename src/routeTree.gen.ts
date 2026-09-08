@@ -18,6 +18,7 @@ import { Route as Char91DotwellKnownChar93OauthProtectedResourceRouteImport } fr
 import { Route as NotebooksIndexRouteImport } from './routes/notebooks/index'
 import { Route as NotebooksNotebookIdRouteImport } from './routes/notebooks/$notebookId'
 import { Route as NotebooksConnectRouteImport } from './routes/notebooks/connect'
+import { Route as OauthConsentRouteImport } from './routes/oauth/consent'
 import { Route as DotlovableOauthConsentRouteImport } from './routes/[.]lovable.oauth.consent'
 import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[.mcp]/invoke-tool/$tool'
 import { Route as ApiPublicGoogleCallbackRouteImport } from './routes/api/public/google/callback'
@@ -69,6 +70,11 @@ const NotebooksConnectRoute = NotebooksConnectRouteImport.update({
   path: '/notebooks/connect',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OauthConsentRoute = OauthConsentRouteImport.update({
+  id: '/oauth/consent',
+  path: '/oauth/consent',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DotlovableOauthConsentRoute = DotlovableOauthConsentRouteImport.update({
   id: '/.lovable/oauth/consent',
   path: '/.lovable/oauth/consent',
@@ -95,6 +101,7 @@ export interface FileRoutesByFullPath {
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
   '/notebooks/$notebookId': typeof NotebooksNotebookIdRoute
   '/notebooks/connect': typeof NotebooksConnectRoute
+  '/oauth/consent': typeof OauthConsentRoute
   '/notebooks/': typeof NotebooksIndexRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -109,6 +116,7 @@ export interface FileRoutesByTo {
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
   '/notebooks/$notebookId': typeof NotebooksNotebookIdRoute
   '/notebooks/connect': typeof NotebooksConnectRoute
+  '/oauth/consent': typeof OauthConsentRoute
   '/notebooks': typeof NotebooksIndexRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -124,6 +132,7 @@ export interface FileRoutesById {
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
   '/notebooks/$notebookId': typeof NotebooksNotebookIdRoute
   '/notebooks/connect': typeof NotebooksConnectRoute
+  '/oauth/consent': typeof OauthConsentRoute
   '/notebooks/': typeof NotebooksIndexRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -140,6 +149,7 @@ export interface FileRouteTypes {
     | '/.well-known/oauth-protected-resource'
     | '/notebooks/$notebookId'
     | '/notebooks/connect'
+    | '/oauth/consent'
     | '/notebooks/'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
@@ -154,6 +164,7 @@ export interface FileRouteTypes {
     | '/.well-known/oauth-protected-resource'
     | '/notebooks/$notebookId'
     | '/notebooks/connect'
+    | '/oauth/consent'
     | '/notebooks'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
@@ -168,6 +179,7 @@ export interface FileRouteTypes {
     | '/.well-known/oauth-protected-resource'
     | '/notebooks/$notebookId'
     | '/notebooks/connect'
+    | '/oauth/consent'
     | '/notebooks/'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
@@ -183,6 +195,7 @@ export interface RootRouteChildren {
   Char91DotwellKnownChar93OauthProtectedResourceRoute: typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
   NotebooksNotebookIdRoute: typeof NotebooksNotebookIdRoute
   NotebooksConnectRoute: typeof NotebooksConnectRoute
+  OauthConsentRoute: typeof OauthConsentRoute
   NotebooksIndexRoute: typeof NotebooksIndexRoute
   DotlovableOauthConsentRoute: typeof DotlovableOauthConsentRoute
   Char91DotmcpChar93InvokeToolToolRoute: typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -254,6 +267,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NotebooksConnectRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/oauth/consent': {
+      id: '/oauth/consent'
+      path: '/oauth/consent'
+      fullPath: '/oauth/consent'
+      preLoaderRoute: typeof OauthConsentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/.lovable/oauth/consent': {
       id: '/.lovable/oauth/consent'
       path: '/.lovable/oauth/consent'
@@ -288,6 +308,7 @@ const rootRouteChildren: RootRouteChildren = {
     Char91DotwellKnownChar93OauthProtectedResourceRoute,
   NotebooksNotebookIdRoute: NotebooksNotebookIdRoute,
   NotebooksConnectRoute: NotebooksConnectRoute,
+  OauthConsentRoute: OauthConsentRoute,
   NotebooksIndexRoute: NotebooksIndexRoute,
   DotlovableOauthConsentRoute: DotlovableOauthConsentRoute,
   Char91DotmcpChar93InvokeToolToolRoute: Char91DotmcpChar93InvokeToolToolRoute,
