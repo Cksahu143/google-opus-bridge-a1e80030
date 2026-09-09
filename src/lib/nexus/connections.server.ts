@@ -18,6 +18,20 @@ export interface StoredConnection {
   updated_at: string;
 }
 
+export type GoogleConnectionSaveStage =
+  | "vault_storage"
+  | "metadata_persistence";
+
+export class GoogleConnectionSaveError extends Error {
+  readonly stage: GoogleConnectionSaveStage;
+
+  constructor(stage: GoogleConnectionSaveStage, cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Unexpected persistence error.");
+    this.name = "GoogleConnectionSaveError";
+    this.stage = stage;
+  }
+}
+
 async function admin() {
   const { supabaseAdmin } = await import(
     "@/integrations/supabase/client.server"
@@ -90,7 +104,12 @@ export async function saveConnection(params: {
 }) {
   const db = await admin();
 
-  const existing = await getConnection(params.userId);
+  let existing: StoredConnection | null;
+  try {
+    existing = await getConnection(params.userId);
+  } catch (error) {
+    throw new GoogleConnectionSaveError("metadata_persistence", error);
+  }
 
   const expiresAt = new Date(
     Date.now() + params.expiresInSeconds * 1000,
@@ -122,7 +141,7 @@ export async function saveConnection(params: {
     );
 
   if (metadataError) {
-    throw metadataError;
+    throw new GoogleConnectionSaveError("metadata_persistence", metadataError);
   }
 
   /*
@@ -151,7 +170,7 @@ export async function saveConnection(params: {
       })
       .eq("user_id", params.userId);
 
-    throw error;
+    throw new GoogleConnectionSaveError("vault_storage", error);
   }
 
   /*
@@ -167,7 +186,7 @@ export async function saveConnection(params: {
     .eq("user_id", params.userId);
 
   if (connectedError) {
-    throw connectedError;
+    throw new GoogleConnectionSaveError("metadata_persistence", connectedError);
   }
 }
 

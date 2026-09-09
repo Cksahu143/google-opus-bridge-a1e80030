@@ -482,67 +482,39 @@ export type Database = {
     Views: {
       [_ in never]: never
     }
-  Functions: {
-  consume_oauth_state: {
-    Args: {
-      p_state: string
-    }
-    Returns: Json
-  }
-
-  vault_create_secret: {
-    Args: {
-      secret_description?: string
-      secret_name: string
-      secret_value: string
-    }
-    Returns: string
-  }
-
-  vault_delete_google_tokens: {
-    Args: {
-      p_user_id: string
-    }
-    Returns: undefined
-  }
-
-  vault_delete_secret_by_name: {
-    Args: {
-      secret_name: string
-    }
-    Returns: undefined
-  }
-
-  vault_has_google_tokens: {
-    Args: {
-      p_user_id: string
-    }
-    Returns: boolean
-  }
-
-  vault_read_google_tokens: {
-    Args: {
-      p_user_id: string
-    }
-    Returns: Json
-  }
-
-  vault_read_secret_by_name: {
-    Args: {
-      secret_name: string
-    }
-    Returns: string
-  }
-
-  vault_upsert_google_tokens: {
-    Args: {
-      p_access_token: string
-      p_expires_at?: string
-      p_refresh_token?: string
-      p_user_id: string
-    }
-    Returns: string
-  }
+    Functions: {
+      consume_oauth_state: { Args: { p_state: string }; Returns: Json }
+      vault_create_secret: {
+        Args: {
+          secret_description?: string
+          secret_name: string
+          secret_value: string
+        }
+        Returns: string
+      }
+      vault_delete_google_tokens: {
+        Args: { p_user_id: string }
+        Returns: undefined
+      }
+      vault_delete_secret_by_name: {
+        Args: { secret_name: string }
+        Returns: undefined
+      }
+      vault_has_google_tokens: { Args: { p_user_id: string }; Returns: boolean }
+      vault_read_google_tokens: { Args: { p_user_id: string }; Returns: Json }
+      vault_read_secret_by_name: {
+        Args: { secret_name: string }
+        Returns: string
+      }
+      vault_upsert_google_tokens: {
+        Args: {
+          p_access_token: string
+          p_expires_at?: string
+          p_refresh_token?: string
+          p_user_id: string
+        }
+        Returns: string
+      }
     }
     Enums: {
       [_ in never]: never
