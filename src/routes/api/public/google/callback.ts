@@ -29,9 +29,7 @@ export const Route = createFileRoute(
           );
         }
 
-        const {
-          supabaseAdmin,
-        } = await import(
+        const { supabaseAdmin } = await import(
           "@/integrations/supabase/client.server"
         );
 
@@ -46,14 +44,27 @@ export const Route = createFileRoute(
          *
          * This prevents the same OAuth state from being reused.
          */
-        const { data: oauthState, error: stateError } =
-          await supabaseAdmin.rpc("consume_oauth_state", {
+        let oauthState: unknown;
+        let stateError: unknown;
+
+        try {
+          const result = await supabaseAdmin.rpc("consume_oauth_state", {
             p_state: state,
           });
+          oauthState = result.data;
+          stateError = result.error;
+        } catch (cause) {
+          return fail(
+            diagnostic(
+              "OAuth state RPC",
+              cause,
+            ),
+          );
+        }
 
         if (stateError) {
           return fail(
-            "Unable to validate the Google sign-in state.",
+            diagnostic("OAuth state RPC", stateError),
           );
         }
 
@@ -63,7 +74,7 @@ export const Route = createFileRoute(
           Array.isArray(oauthState)
         ) {
           return fail(
-            "This sign-in link expired. Start the connection again.",
+            "Google connection diagnostic: OAuth state not found/expired failed — the sign-in state was missing or expired.",
           );
         }
 
@@ -84,7 +95,7 @@ export const Route = createFileRoute(
 
         if (!userId || !codeVerifier) {
           return fail(
-            "Invalid OAuth state. Start the connection again.",
+            "Google connection diagnostic: OAuth state payload failed — required state fields were missing.",
           );
         }
 
@@ -97,38 +108,51 @@ export const Route = createFileRoute(
           "@/lib/nexus/connect.server"
         );
 
-        const { saveConnection } = await import(
+        const { GoogleConnectionSaveError, saveConnection } = await import(
           "@/lib/nexus/connections.server"
         );
 
+        let tokens;
         try {
-          const tokens = await exchangeCodeForTokens({
+          tokens = await exchangeCodeForTokens({
             code,
             redirectUri: callbackUrlFor(request.url),
             codeVerifier,
           });
+        } catch (cause) {
+          return fail(diagnostic("Google authorization-code exchange", cause));
+        }
 
-          const profile = await fetchUserInfo(
-            tokens.access_token,
-          );
+        let profile;
+        try {
+          profile = await fetchUserInfo(tokens.access_token);
+        } catch (cause) {
+          return fail(diagnostic("Google profile/user-info fetch", cause));
+        }
 
+        try {
           await saveConnection({
             userId,
             accessToken: tokens.access_token,
             refreshToken: tokens.refresh_token,
             expiresInSeconds: tokens.expires_in,
-            scopes: tokens.scope
-              ? tokens.scope.split(" ")
-              : [],
+            scopes: tokens.scope ? tokens.scope.split(" ") : [],
             googleEmail: profile.email,
             googleSub: profile.sub,
           });
         } catch (cause) {
-          return fail(
-            cause instanceof Error
-              ? cause.message
-              : "Google connection failed.",
-          );
+          if (cause instanceof GoogleConnectionSaveError) {
+            return fail(
+              diagnostic(
+                cause.stage === "vault_storage"
+                  ? "Vault token storage"
+                  : "Google connection metadata persistence",
+                cause,
+              ),
+            );
+          }
+
+          return fail(diagnostic("Google connection metadata persistence", cause));
         }
 
         return new Response(null, {
@@ -151,4 +175,30 @@ function fail(message: string) {
       )}`,
     },
   });
+}
+
+function diagnostic(stage: string, cause: unknown): string {
+  return `Google connection diagnostic: ${stage} failed — ${safeErrorMessage(cause)}`;
+}
+
+function safeErrorMessage(cause: unknown): string {
+  const raw = cause instanceof Error ? cause.message : "Unexpected error.";
+  const safe = raw
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
+    .replace(
+      /([?&](?:code|state|access_token|refresh_token|client_secret)=[^&\s]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(
+      /\b(?:access_token|refresh_token|authorization_code|client_secret|id_token)\s*[:=]\s*[^,\s]+/gi,
+      (match) => `${match.slice(0, match.indexOf("=") + 1)}[redacted]`,
+    )
+    .replace(
+      /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+      "[redacted]",
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return safe.slice(0, 240) || "Unexpected error.";
 }
