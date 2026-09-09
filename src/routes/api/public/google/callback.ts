@@ -74,23 +74,24 @@ export const Route = createFileRoute(
           Array.isArray(oauthState)
         ) {
           return fail(
-            "Google connection diagnostic: OAuth state not found/expired failed — the sign-in state was missing or expired.",
+            "Google connection diagnostic: OAuth state not found/expired — the sign-in state was missing or expired.",
           );
         }
 
+        const statePayload = oauthState as Record<string, unknown>;
         const userId =
-          typeof oauthState.user_id === "string"
-            ? oauthState.user_id
+          typeof statePayload["user_id"] === "string"
+            ? statePayload["user_id"]
             : null;
 
         const codeVerifier =
-          typeof oauthState.code_verifier === "string"
-            ? oauthState.code_verifier
+          typeof statePayload["code_verifier"] === "string"
+            ? statePayload["code_verifier"]
             : null;
 
         const redirectTo =
-          typeof oauthState.redirect_to === "string"
-            ? oauthState.redirect_to
+          typeof statePayload["redirect_to"] === "string"
+            ? statePayload["redirect_to"]
             : "/";
 
         if (!userId || !codeVerifier) {
@@ -134,7 +135,7 @@ export const Route = createFileRoute(
           await saveConnection({
             userId,
             accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token,
+            refreshToken: tokens.refresh_token ?? null,
             expiresInSeconds: tokens.expires_in,
             scopes: tokens.scope ? tokens.scope.split(" ") : [],
             googleEmail: profile.email,
@@ -190,8 +191,8 @@ function safeErrorMessage(cause: unknown): string {
       "$1=[redacted]",
     )
     .replace(
-      /\b(?:access_token|refresh_token|authorization_code|client_secret|id_token)\s*[:=]\s*[^,\s]+/gi,
-      (match) => `${match.slice(0, match.indexOf("=") + 1)}[redacted]`,
+      /\b(?:access_token|refresh_token|authorization_code|client_secret|id_token)\s*([:=])\s*[^,\s]+/gi,
+      (_match, separator: string) => `[credential redacted]${separator}[redacted]`,
     )
     .replace(
       /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
