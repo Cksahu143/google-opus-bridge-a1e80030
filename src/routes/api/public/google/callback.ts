@@ -20,7 +20,7 @@ export const Route = createFileRoute(
         const state = url.searchParams.get("state");
 
         if (error) {
-          return fail(`Google denied the request: ${error}`);
+          return fail(`Google denied the request: ${safeErrorMessage(error)}`);
         }
 
         if (!code || !state) {
@@ -187,8 +187,8 @@ function safeErrorMessage(cause: unknown): string {
   const safe = raw
     .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
     .replace(
-      /([?&](?:code|state|access_token|refresh_token|client_secret)=[^&\s]+)/gi,
-      "$1=[redacted]",
+      /([?&](?:code|state|access_token|refresh_token|client_secret)=)[^&\s]+/gi,
+      "$1[redacted]",
     )
     .replace(
       /\b(?:access_token|refresh_token|authorization_code|client_secret|id_token)\s*([:=])\s*[^,\s]+/gi,
